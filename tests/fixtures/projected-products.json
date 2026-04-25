@@ -1,0 +1,84 @@
+[
+  {
+    "centric_style_id": "CENTRIC-1001",
+    "brand_code": "HH",
+    "brand_name": "Helly Hansen",
+    "global_style_id": "S0001001",
+    "style_name": "Spitz GTX Pro II Jacket",
+    "product_type_code": "SHELL_JACKET",
+    "lifecycle_status": "Approved",
+    "season": "FW26",
+    "attributes": {
+      "BRAND_DPP_OWNER": "hh-product-data@example.com",
+      "MEMBRANE_TYPE": "GORE-TEX Pro",
+      "WATERPROOF_RATING": 28000,
+      "BREATHABILITY_RATING": 20000,
+      "MATERIAL_COMPOSITION": "100% recycled polyamide",
+      "CARE_INSTRUCTION": "Machine wash 30C",
+      "COUNTRY_OF_ORIGIN": "VN",
+      "SUPPLIER_FACILITY": "FAC-001"
+    },
+    "variants": [
+      {
+        "centric_variant_id": "VAR-1001-BLK-M",
+        "global_variant_id": "V0001001-BLK-M",
+        "sku": "SPITZ-BLK-M",
+        "gtin": "07340000000000",
+        "color_name": "True Black",
+        "size_value": "M"
+      }
+    ]
+  },
+  {
+    "centric_style_id": "CENTRIC-1002",
+    "brand_code": "HH",
+    "brand_name": "Helly Hansen",
+    "global_style_id": null,
+    "style_name": "Incomplete Shell Jacket",
+    "product_type_code": "SHELL_JACKET",
+    "lifecycle_status": "Draft",
+    "season": "FW26",
+    "attributes": {
+      "MEMBRANE_TYPE": "HELLY TECH",
+      "WATERPROOF_RATING": "20000",
+      "MATERIAL_COMPOSITION": "",
+      "CARE_INSTRUCTION": "Machine wash 30C",
+      "COUNTRY_OF_ORIGIN": "CN"
+    },
+    "variants": [
+      {
+        "centric_variant_id": "VAR-1002-NVY-L",
+        "global_variant_id": null,
+        "sku": "INCOMPLETE-NVY-L",
+        "gtin": null,
+        "color_name": "Navy",
+        "size_value": "L"
+      }
+    ]
+  },
+  {
+    "centric_style_id": "CENTRIC-2001",
+    "brand_code": "MUSTO",
+    "brand_name": "Musto",
+    "global_style_id": "S0002001",
+    "style_name": "Training Fleece",
+    "product_type_code": "FLEECE_JACKET",
+    "lifecycle_status": "Approved",
+    "season": "SS27",
+    "attributes": {
+      "MATERIAL_COMPOSITION": "92% recycled polyester, 8% elastane",
+      "CARE_INSTRUCTION": "Wash with similar colors",
+      "COUNTRY_OF_ORIGIN": "PT"
+    },
+    "variants": [
+      {
+        "centric_variant_id": "VAR-2001-GRY-S",
+        "global_variant_id": "V0002001-GRY-S",
+        "sku": "TRAIN-FLEECE-GRY-S",
+        "gtin": null,
+        "color_name": "Grey",
+        "size_value": "S"
+      }
+    ]
+  }
+]

@@ -1,0 +1,13 @@
+base_url: https://centric.example.com
+timeout: 30
+token: replace-with-token-or-wire-env-loading-later
+
+endpoints:
+  - name: styles
+    api_version: v2
+    path: styles
+    limit: 100
+    query_params:
+      decoded: true
+      active: true
+      sort: _modified_at

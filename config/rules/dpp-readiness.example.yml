@@ -1,0 +1,67 @@
+version: 2026.04.v1
+
+score:
+  blocking_error: 20
+  warning: 5
+
+brands:
+  - code: HH
+    name: Helly Hansen
+    required_attributes:
+      - BRAND_DPP_OWNER
+  - code: MUSTO
+    name: Musto
+    required_attributes: []
+
+attributes:
+  - code: BRAND_DPP_OWNER
+    label: Brand DPP Owner
+    data_type: string
+  - code: MEMBRANE_TYPE
+    label: Membrane Type
+    data_type: string
+  - code: WATERPROOF_RATING
+    label: Waterproof Rating
+    data_type: number
+  - code: BREATHABILITY_RATING
+    label: Breathability Rating
+    data_type: number
+  - code: MATERIAL_COMPOSITION
+    label: Material Composition
+    data_type: string
+  - code: CARE_INSTRUCTION
+    label: Care Instruction
+    data_type: string
+  - code: COUNTRY_OF_ORIGIN
+    label: Country Of Origin
+    data_type: string
+  - code: SUPPLIER_FACILITY
+    label: Supplier Facility
+    data_type: string
+  - code: INSULATION_TYPE
+    label: Insulation Type
+    data_type: string
+
+product_types:
+  - code: SHELL_JACKET
+    label: Shell Jacket
+    dpp_template_code: DPP_OUTERWEAR_SHELL
+    required_attributes:
+      - MEMBRANE_TYPE
+      - WATERPROOF_RATING
+      - BREATHABILITY_RATING
+      - MATERIAL_COMPOSITION
+      - CARE_INSTRUCTION
+      - COUNTRY_OF_ORIGIN
+      - SUPPLIER_FACILITY
+    warning_attributes: []
+
+  - code: FLEECE_JACKET
+    label: Fleece Jacket
+    dpp_template_code: DPP_OUTERWEAR_FLEECE
+    required_attributes:
+      - MATERIAL_COMPOSITION
+      - CARE_INSTRUCTION
+      - COUNTRY_OF_ORIGIN
+    warning_attributes:
+      - INSULATION_TYPE
