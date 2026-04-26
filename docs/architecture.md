@@ -30,7 +30,6 @@ Centric API or export
 - `CENTRIC_BASE_URL`, `CENTRIC_USERNAME`, and `CENTRIC_PASSWORD` come from process environment
   or `.env`, never from fetch config.
 - Session tokens are process memory only. No token cache file is written.
-- The `archive-output` feature from `~/centric-api-fetcher` is intentionally omitted.
 
 ## Next Technical Steps
 

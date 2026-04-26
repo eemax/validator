@@ -1,0 +1,129 @@
+timeout: 30
+retry_max_attempts: 3
+retry_base_seconds: 40
+retry_max_seconds: 75
+jitter_ratio: 0.1
+output_dir: data/raw
+checkpoint_dir: data/checkpoints
+env_file: .env
+
+endpoints:
+  - name: seasons
+    api_version: v2
+    path: seasons
+    skip_param: skip
+    limit_param: limit
+    limit: 50
+    item_path: $
+    count_spec:
+      api_version: v2
+      path: count/Season
+      result_path: $.count
+  - name: styles
+    api_version: v2
+    path: styles
+    query_params:
+      "nwg_style_integration_phase=": production
+    skip_param: skip
+    limit_param: limit
+    limit: 50
+    item_path: $
+    count_spec:
+      api_version: v2
+      path: count/Style
+      query_params:
+        "nwg_style_integration_phase=": production
+      result_path: $.count
+  - name: materials
+    api_version: v2
+    path: materials
+    query_params:
+      "nwg_library_item_material_material_status=": Approved
+      "active=": true
+    skip_param: skip
+    limit_param: limit
+    limit: 50
+    item_path: $
+    count_spec:
+      api_version: v2
+      path: count/Material
+      query_params:
+        "nwg_library_item_material_material_status=": Approved
+        "active=": true
+      result_path: $.count
+  - name: colorways
+    api_version: v2
+    path: colorways
+    query_params:
+      "active=": true
+    skip_param: skip
+    limit_param: limit
+    limit: 50
+    item_path: $
+    count_spec:
+      api_version: v2
+      path: count/Colorway
+      query_params:
+        "active=": true
+      result_path: $.count
+  - name: boms
+    api_version: v3
+    path: apparel_bom_revisions
+    query_params:
+      "phase=": centric://REFLECTION/INSTANCE/_CS_Phase/Production
+      "state=": APPROVED
+    skip_param: skip
+    limit_param: limit
+    limit: 50
+    item_path: $
+    count_spec:
+      api_version: v2
+      path: count/ApparelBOMRevision
+      query_params:
+        "phase=": centric://REFLECTION/INSTANCE/_CS_Phase/Production
+        "state=": APPROVED
+      result_path: $.count
+  - name: bomrows
+    api_version: v3
+    path: part_materials
+    skip_param: skip
+    limit_param: limit
+    limit: 50
+    item_path: $
+    count_spec:
+      api_version: v2
+      path: count/PartMaterial
+      result_path: $.count
+  - name: supplierquotes
+    api_version: v2
+    path: supplier_item_revisions
+    skip_param: skip
+    limit_param: limit
+    limit: 50
+    item_path: $
+    count_spec:
+      api_version: v2
+      path: count/SupplierItemRevision
+      result_path: $.count
+  - name: suppliers
+    api_version: v2
+    path: suppliers
+    skip_param: skip
+    limit_param: limit
+    limit: 50
+    item_path: $
+    count_spec:
+      api_version: v2
+      path: count/Supplier
+      result_path: $.count
+  - name: factories
+    api_version: v2
+    path: factories
+    skip_param: skip
+    limit_param: limit
+    limit: 50
+    item_path: $
+    count_spec:
+      api_version: v2
+      path: count/Factory
+      result_path: $.count
