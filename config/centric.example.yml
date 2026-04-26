@@ -1,13 +1,25 @@
-base_url: https://centric.example.com
 timeout: 30
-token: replace-with-token-or-wire-env-loading-later
+retry_max_attempts: 3
+retry_base_seconds: 1
+retry_max_seconds: 8
+jitter_ratio: 0.2
+output_dir: data/raw
+checkpoint_dir: data/checkpoints
+env_file: .env
 
 endpoints:
   - name: styles
     api_version: v2
     path: styles
-    limit: 100
     query_params:
-      decoded: true
       active: true
-      sort: _modified_at
+    skip_param: skip
+    limit_param: limit
+    limit: 100
+    item_path: $
+    count_spec:
+      api_version: v2
+      path: styles/count
+      query_params:
+        active: true
+      result_path: $.total

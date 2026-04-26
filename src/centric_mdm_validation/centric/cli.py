@@ -1,0 +1,1169 @@
+from __future__ import annotations
+
+import argparse
+import calendar
+import json
+import re
+import sys
+import time
+from collections.abc import Callable
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any, Literal, TextIO
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+from .auth import AuthError, init_auth_context
+from .config import ConfigError, load_fetcher_settings
+from .delta import apply_data_sort, build_delta_endpoint_spec, strip_modified_at_filters
+from .fetcher import FetchError, run_endpoint
+from .models import EndpointSpec, FetchProgressEvent, FetchRunResult
+
+_DELTA_STATE_VERSION = 1
+_DEFAULT_DELTA_STATE_PATH = Path("config/delta_fetcher.yaml")
+_DEFAULT_DELTA_LOG_PATH = Path("data/delta.log")
+_DEFAULT_FETCH_LOG_PATH = Path("fetcher.log")
+_DEFAULT_DELTA_OVERLAP_MINUTES = 60
+_DEFAULT_DELTA_OVERLAP_DAYS = 0
+_MAX_DELTA_OVERLAP_DAYS = 1000
+_MIN_MONTHS_BACK = 1
+_MAX_MONTHS_BACK = 120
+_RUN_INTERRUPTED_MESSAGE = "interrupted by user (Ctrl+C)."
+_SAFE_NAME_PATTERN = re.compile(r"[^A-Za-z0-9_.-]+")
+_LOG_LEVEL_RANKS: dict[str, int] = {
+    "off": 0,
+    "summary": 1,
+    "http": 2,
+    "debug": 3,
+}
+_SENSITIVE_QUERY_KEYS = {"token", "password", "api_key", "authorization"}
+LogLevel = Literal["off", "summary", "http", "debug"]
+LogFormat = Literal["text", "jsonl"]
+LogEvent = dict[str, Any]
+LogCallback = Callable[[LogEvent], None]
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _utc_iso(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _parse_utc_iso(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _normalize_delta_overlap_minutes(value: Any) -> int:
+    if isinstance(value, bool):
+        return _DEFAULT_DELTA_OVERLAP_MINUTES
+    if isinstance(value, int) and value >= 0:
+        return value
+    return _DEFAULT_DELTA_OVERLAP_MINUTES
+
+
+def _normalize_delta_overlap_days(value: Any) -> int:
+    if isinstance(value, bool):
+        return _DEFAULT_DELTA_OVERLAP_DAYS
+    if isinstance(value, int) and 0 <= value <= _MAX_DELTA_OVERLAP_DAYS:
+        return value
+    return _DEFAULT_DELTA_OVERLAP_DAYS
+
+
+def _resolve_delta_overlaps(delta_state: dict[str, Any]) -> tuple[int, int]:
+    overlap_minutes = _normalize_delta_overlap_minutes(delta_state.get("overlap_minutes"))
+    overlap_days = _normalize_delta_overlap_days(delta_state.get("overlap_days"))
+    delta_state["overlap_minutes"] = overlap_minutes
+    delta_state["overlap_days"] = overlap_days
+    return overlap_minutes, overlap_days
+
+
+def _load_delta_state(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {
+            "version": _DELTA_STATE_VERSION,
+            "updated_at": None,
+            "overlap_minutes": _DEFAULT_DELTA_OVERLAP_MINUTES,
+            "overlap_days": _DEFAULT_DELTA_OVERLAP_DAYS,
+            "endpoints": {},
+        }
+    try:
+        import yaml  # type: ignore
+    except Exception as exc:  # pragma: no cover - mirrored in config tests
+        raise ConfigError("Delta mode requires PyYAML to read/write delta state.") from exc
+
+    with path.open("r", encoding="utf-8") as fh:
+        payload = yaml.safe_load(fh)
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        raise ConfigError(f"Delta state root must be an object: {path}")
+
+    endpoints = payload.get("endpoints", {})
+    if not isinstance(endpoints, dict):
+        raise ConfigError(f"Delta state 'endpoints' must be an object: {path}")
+
+    return {
+        "version": _DELTA_STATE_VERSION,
+        "updated_at": payload.get("updated_at"),
+        "overlap_minutes": _normalize_delta_overlap_minutes(payload.get("overlap_minutes")),
+        "overlap_days": _normalize_delta_overlap_days(payload.get("overlap_days")),
+        "endpoints": endpoints,
+    }
+
+
+def _write_delta_state(path: Path, state: dict[str, Any]) -> None:
+    try:
+        import yaml  # type: ignore
+    except Exception as exc:  # pragma: no cover - mirrored in config tests
+        raise ConfigError("Delta mode requires PyYAML to read/write delta state.") from exc
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.parent / f".{path.name}.tmp"
+    temp_path.write_text(yaml.safe_dump(state, sort_keys=False), encoding="utf-8")
+    temp_path.replace(path)
+
+
+def _append_delta_log(path: Path, record: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, separators=(",", ":")) + "\n")
+
+
+def _redact_url_query(url: str) -> str:
+    split_url = urlsplit(url)
+    if not split_url.query:
+        return url
+
+    params = parse_qsl(split_url.query, keep_blank_values=True)
+    changed = False
+    redacted: list[tuple[str, str]] = []
+    for key, value in params:
+        if key.lower() in _SENSITIVE_QUERY_KEYS:
+            redacted.append((key, "***"))
+            changed = True
+        else:
+            redacted.append((key, value))
+    if not changed:
+        return url
+
+    return urlunsplit(
+        (
+            split_url.scheme,
+            split_url.netloc,
+            split_url.path,
+            urlencode(redacted, doseq=True),
+            split_url.fragment,
+        )
+    )
+
+
+def _render_log_line(record: LogEvent, *, log_format: LogFormat) -> str:
+    if log_format == "jsonl":
+        return json.dumps(record, separators=(",", ":"))
+
+    pieces = [
+        str(record.get("timestamp", "")),
+        str(record.get("level", "summary")).upper(),
+        str(record.get("event", "event")),
+    ]
+    for key in sorted(key for key in record if key not in {"timestamp", "level", "event"}):
+        pieces.append(f"{key}={json.dumps(record[key], separators=(',', ':'), ensure_ascii=True)}")
+    return " ".join(pieces)
+
+
+def _build_log_callback(
+    log_file: TextIO,
+    *,
+    log_level: LogLevel,
+    log_format: LogFormat,
+) -> LogCallback:
+    selected_rank = _LOG_LEVEL_RANKS[log_level]
+
+    def _log(event: LogEvent) -> None:
+        event_level = str(event.get("level", "summary")).lower()
+        event_rank = _LOG_LEVEL_RANKS.get(event_level, _LOG_LEVEL_RANKS["debug"])
+        if event_rank > selected_rank:
+            return
+
+        record: LogEvent = {"timestamp": _utc_iso(_utc_now()), **event}
+        url = record.get("url")
+        if isinstance(url, str):
+            record["url"] = _redact_url_query(url)
+
+        log_file.write(_render_log_line(record, log_format=log_format) + "\n")
+        log_file.flush()
+
+    return _log
+
+
+def _safe_checkpoint_name(endpoint_name: str) -> str:
+    return _SAFE_NAME_PATTERN.sub("_", endpoint_name)
+
+
+def _read_checkpoint_completed_state(path: Path) -> bool | None:
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if "completed" not in payload:
+        return None
+    completed = payload.get("completed")
+    return completed if isinstance(completed, bool) else None
+
+
+def _infer_resume_completed_hint(delta_state: dict[str, Any], endpoint_name: str) -> bool | None:
+    endpoints = delta_state.get("endpoints", {})
+    if not isinstance(endpoints, dict):
+        return None
+    endpoint_state = endpoints.get(endpoint_name, {})
+    if not isinstance(endpoint_state, dict):
+        return None
+
+    status = endpoint_state.get("last_attempted_status")
+    error = endpoint_state.get("last_attempted_error")
+    error_is_empty = error is None or (isinstance(error, str) and not error.strip())
+    if status == "OK" and error_is_empty:
+        return True
+    return None
+
+
+def _derive_delta_floor(
+    delta_state: dict[str, Any], endpoint_name: str, overlap_minutes: int, overlap_days: int
+) -> str | None:
+    endpoints = delta_state.get("endpoints", {})
+    if not isinstance(endpoints, dict):
+        return None
+    endpoint_state = endpoints.get(endpoint_name, {})
+    if not isinstance(endpoint_state, dict):
+        return None
+    successful_start = _parse_utc_iso(endpoint_state.get("last_successful_fetch_start"))
+    if successful_start is None:
+        return None
+    floor = successful_start - timedelta(minutes=overlap_minutes, days=overlap_days)
+    return _utc_iso(floor)
+
+
+def _subtract_calendar_months(value: datetime, months: int) -> datetime:
+    total_month_index = (value.year * 12 + (value.month - 1)) - months
+    year = total_month_index // 12
+    month = (total_month_index % 12) + 1
+    last_day = calendar.monthrange(year, month)[1]
+    day = min(value.day, last_day)
+    return value.replace(year=year, month=month, day=day)
+
+
+def _apply_modified_since_filter(spec: EndpointSpec, modified_since: str) -> EndpointSpec:
+    query_params = strip_modified_at_filters(spec.query_params)
+    query_params["_modified_at=ge"] = modified_since
+
+    next_count_spec = None
+    if spec.count_spec is not None:
+        count_query_params = strip_modified_at_filters(spec.count_spec.query_params)
+        count_query_params["_modified_at=ge"] = modified_since
+        next_count_spec = replace(spec.count_spec, query_params=count_query_params)
+
+    return replace(spec, query_params=query_params, count_spec=next_count_spec)
+
+
+def _parse_months_back(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("--months must be an integer.") from exc
+    if parsed < _MIN_MONTHS_BACK or parsed > _MAX_MONTHS_BACK:
+        raise argparse.ArgumentTypeError(
+            f"--months must be between {_MIN_MONTHS_BACK} and {_MAX_MONTHS_BACK}."
+        )
+    return parsed
+
+
+def _classify_delta_status(result: FetchRunResult | None, error: str | None) -> str:
+    if error is not None:
+        return "FAILED"
+    if result is None:
+        return "FAILED"
+    if result.already_completed:
+        return "OK"
+    if result.warnings:
+        return "PARTIAL"
+    return "OK"
+
+
+def _update_delta_state_for_endpoint(
+    delta_state: dict[str, Any],
+    *,
+    endpoint_name: str,
+    status: str,
+    attempt_start: str,
+    attempt_end: str,
+    error: str | None,
+) -> None:
+    endpoints = delta_state.setdefault("endpoints", {})
+    if not isinstance(endpoints, dict):
+        endpoints = {}
+        delta_state["endpoints"] = endpoints
+
+    existing = endpoints.get(endpoint_name, {})
+    if not isinstance(existing, dict):
+        existing = {}
+
+    existing["last_attempted_fetch_start"] = attempt_start
+    existing["last_attempted_fetch_end"] = attempt_end
+    existing["last_attempted_status"] = status
+    existing["last_attempted_error"] = error
+
+    if status in {"OK", "PARTIAL"}:
+        existing["last_successful_fetch_start"] = attempt_start
+        existing["last_successful_fetch_end"] = attempt_end
+
+    endpoints[endpoint_name] = existing
+    delta_state["version"] = _DELTA_STATE_VERSION
+    delta_state["updated_at"] = attempt_end
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="centric-fetch")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    run_parser = subparsers.add_parser("run", help="Run fetch jobs for one or more endpoints")
+    run_parser.add_argument("--config", required=True, help="Path to JSON/YAML fetcher config")
+    run_parser.add_argument(
+        "--endpoint",
+        action="append",
+        default=[],
+        help="Endpoint name to run (repeatable). Defaults to all endpoints.",
+    )
+    run_parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Override output_dir from config.",
+    )
+    run_parser.add_argument(
+        "--checkpoint-dir",
+        default=None,
+        help="Override checkpoint_dir from config.",
+    )
+    run_parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from endpoint checkpoint if present.",
+    )
+    run_parser.add_argument(
+        "--delta",
+        action="store_true",
+        help="Run in delta mode using per-endpoint _modified_at floor and delta state tracking.",
+    )
+    run_parser.add_argument(
+        "--delta-state-file",
+        default=str(_DEFAULT_DELTA_STATE_PATH),
+        help=f"Delta state YAML path (default: {_DEFAULT_DELTA_STATE_PATH}).",
+    )
+    run_parser.add_argument(
+        "--delta-dry-run",
+        action="store_true",
+        help="Compute and print delta floors/injected filters without fetching data.",
+    )
+    run_parser.add_argument(
+        "--months",
+        type=_parse_months_back,
+        default=None,
+        metavar=f"{_MIN_MONTHS_BACK}-{_MAX_MONTHS_BACK}",
+        help=(
+            f"Non-delta mode only: fetch records modified in the last N calendar months "
+            f"({_MIN_MONTHS_BACK}-{_MAX_MONTHS_BACK})."
+        ),
+    )
+    run_parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress live progress and final summary on stderr.",
+    )
+    run_parser.add_argument(
+        "--log-level",
+        choices=["off", "summary", "http", "debug"],
+        default="off",
+        help="Logging level for run logs (off, summary, http, debug).",
+    )
+    run_parser.add_argument(
+        "--log-format",
+        choices=["text", "jsonl"],
+        default="text",
+        help="Run log output format.",
+    )
+    run_parser.add_argument(
+        "--log-file",
+        default=None,
+        help=f"Run log file path (default: {_DEFAULT_FETCH_LOG_PATH} when --log-level is not off).",
+    )
+
+    run_parser.add_argument(
+        "--env-file",
+        default=None,
+        help="Optional .env path for CENTRIC_BASE_URL, CENTRIC_USERNAME, and CENTRIC_PASSWORD.",
+    )
+    run_parser.add_argument("--timeout", type=float, default=None)
+
+    return parser
+
+
+def _select_endpoints(all_specs: list[EndpointSpec], names: list[str]) -> list[EndpointSpec]:
+    if not names:
+        return all_specs
+    wanted = set(names)
+    selected = [spec for spec in all_specs if spec.name in wanted]
+    missing = sorted(wanted - {spec.name for spec in selected})
+    if missing:
+        raise ConfigError(f"Unknown endpoint names: {', '.join(missing)}")
+    return selected
+
+
+def _format_seconds(value: float | None) -> str:
+    seconds = value if value is not None else 0.0
+    return f"{seconds:.2f}s"
+
+
+def _write_progress_line(event: FetchProgressEvent) -> None:
+    if event.kind == "endpoint_start":
+        expected = event.expected_count if event.expected_count is not None else "unknown"
+        print(
+            f"[{event.endpoint}] start: skip={event.start_skip} limit={event.limit} "
+            f"expected={expected} retries={event.retries_used} "
+            f"elapsed={_format_seconds(event.elapsed_seconds)}",
+            file=sys.stderr,
+        )
+        return
+
+    if event.kind == "page_fetched":
+        line = (
+            f"[{event.endpoint}] page {event.page_index}: page_items={event.page_items} "
+            f"total_items={event.items_fetched} skip={event.skip} next_skip={event.next_skip} "
+            f"elapsed={_format_seconds(event.elapsed_seconds)}"
+        )
+        if event.percent_complete is not None:
+            line += f" progress={event.percent_complete:.1f}%"
+        print(line, file=sys.stderr)
+        return
+
+    if event.kind == "warning":
+        print(f"[{event.endpoint}] warning: {event.message}", file=sys.stderr)
+        return
+
+    if event.kind == "endpoint_finish":
+        print(
+            f"[{event.endpoint}] finish: pages={event.pages_fetched} items={event.items_fetched} "
+            f"retries={event.retries_used} warnings={event.warnings_count} "
+            f"elapsed={_format_seconds(event.elapsed_seconds)}",
+            file=sys.stderr,
+        )
+
+
+def _print_run_summary(
+    selected_count: int,
+    results: list[FetchRunResult],
+    failures: list[tuple[str, str]],
+    duration_seconds: float,
+) -> None:
+    total_items = sum(result.items_fetched for result in results)
+    total_pages = sum(result.pages_fetched for result in results)
+    total_retries = sum(result.retries_used for result in results)
+    print("Run summary:", file=sys.stderr)
+    print(f"  endpoints_total: {selected_count}", file=sys.stderr)
+    print(f"  endpoints_succeeded: {len(results)}", file=sys.stderr)
+    print(f"  endpoints_failed: {len(failures)}", file=sys.stderr)
+    print(f"  total_items: {total_items}", file=sys.stderr)
+    print(f"  total_pages: {total_pages}", file=sys.stderr)
+    print(f"  total_retries: {total_retries}", file=sys.stderr)
+    print(f"  duration: {_format_seconds(duration_seconds)}", file=sys.stderr)
+    if failures:
+        print("  failed_endpoints:", file=sys.stderr)
+        for endpoint, message in failures:
+            print(f"    - {endpoint}: {message}", file=sys.stderr)
+
+
+def _build_delta_run_summary_record(
+    *,
+    run_started_at: datetime,
+    run_finished_at: datetime,
+    selected_specs: list[EndpointSpec],
+    results: list[FetchRunResult],
+    failures: list[tuple[str, str]],
+    endpoint_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    status_counts: dict[str, int] = {"OK": 0, "PARTIAL": 0, "FAILED": 0}
+    for record in endpoint_records:
+        status = record.get("status")
+        if isinstance(status, str):
+            status_counts[status] = status_counts.get(status, 0) + 1
+
+    run_status = "OK"
+    if status_counts.get("FAILED", 0) > 0:
+        run_status = (
+            "FAILED" if status_counts.get("FAILED", 0) == len(endpoint_records) else "PARTIAL"
+        )
+    elif status_counts.get("PARTIAL", 0) > 0:
+        run_status = "PARTIAL"
+
+    endpoint_results = []
+    for record in endpoint_records:
+        count_validation = record.get("count_validation")
+        if not isinstance(count_validation, dict):
+            count_validation = {"status": None, "reason": None}
+        endpoint_results.append(
+            {
+                "endpoint": record.get("endpoint"),
+                "status": record.get("status"),
+                "already_completed": bool(record.get("already_completed")),
+                "did_catch_up": bool(record.get("did_catch_up")),
+                "delta_floor": record.get("delta_floor"),
+                "attempt_start": record.get("attempt_start"),
+                "attempt_end": record.get("attempt_end"),
+                "duration_seconds": record.get("duration_seconds"),
+                "items_fetched": record.get("items_fetched"),
+                "pages_fetched": record.get("pages_fetched"),
+                "retries_used": record.get("retries_used"),
+                "count_validation": count_validation,
+                "id_validation_status": record.get("id_validation_status"),
+                "id_validation_checked_items": record.get("id_validation_checked_items"),
+                "id_validation_unique_ids": record.get("id_validation_unique_ids"),
+                "id_validation_reason": record.get("id_validation_reason"),
+                "error": record.get("error"),
+            }
+        )
+
+    return {
+        "run_at": _utc_iso(run_finished_at),
+        "mode": "delta",
+        "record_type": "run_summary",
+        "status": run_status,
+        "run_started_at": _utc_iso(run_started_at),
+        "run_finished_at": _utc_iso(run_finished_at),
+        "duration_seconds": round((run_finished_at - run_started_at).total_seconds(), 3),
+        "endpoints_total": len(selected_specs),
+        "endpoints_succeeded": len(results),
+        "endpoints_failed": len(failures),
+        "endpoints_by_status": status_counts,
+        "endpoints_already_completed": sum(
+            1 for record in endpoint_records if record.get("already_completed")
+        ),
+        "endpoints_caught_up": sum(1 for record in endpoint_records if record.get("did_catch_up")),
+        "selected_endpoints": [spec.name for spec in selected_specs],
+        "total_items": sum(result.items_fetched for result in results),
+        "total_pages": sum(result.pages_fetched for result in results),
+        "total_retries": sum(result.retries_used for result in results),
+        "failures": [{"endpoint": endpoint, "error": message} for endpoint, message in failures],
+        "endpoint_results": endpoint_results,
+    }
+
+
+def _build_delta_endpoint_log_record(
+    *,
+    endpoint_name: str,
+    status: str,
+    delta_floor: str | None,
+    attempt_start: str,
+    attempt_end: str,
+    duration_seconds: float,
+    result: FetchRunResult | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    if result is not None:
+        return {
+            "run_at": attempt_end,
+            "mode": "delta",
+            "endpoint": endpoint_name,
+            "status": status,
+            "delta_floor": (
+                result.effective_delta_floor
+                if result.effective_delta_floor is not None
+                else delta_floor
+            ),
+            "attempt_start": attempt_start,
+            "attempt_end": attempt_end,
+            "duration_seconds": duration_seconds,
+            "expected_count": result.expected_count,
+            "items_fetched": result.items_fetched,
+            "pages_fetched": result.pages_fetched,
+            "retries_used": result.retries_used,
+            "count_validation": {
+                "status": result.count_validation_status,
+                "reason": result.count_validation_reason,
+            },
+            "warnings_count": len(result.warnings),
+            "already_completed": result.already_completed,
+            "did_catch_up": result.did_catch_up,
+            "id_validation_status": result.id_validation_status,
+            "id_validation_checked_items": result.id_validation_checked_items,
+            "id_validation_unique_ids": result.id_validation_unique_ids,
+            "id_validation_reason": result.id_validation_reason,
+            "error": None,
+            "output_file": str(result.output_file),
+            "checkpoint_file": str(result.checkpoint_file),
+        }
+
+    return {
+        "run_at": attempt_end,
+        "mode": "delta",
+        "endpoint": endpoint_name,
+        "status": status,
+        "delta_floor": delta_floor,
+        "attempt_start": attempt_start,
+        "attempt_end": attempt_end,
+        "duration_seconds": duration_seconds,
+        "expected_count": None,
+        "items_fetched": None,
+        "pages_fetched": None,
+        "retries_used": None,
+        "count_validation": None,
+        "warnings_count": None,
+        "id_validation_status": None,
+        "id_validation_checked_items": None,
+        "id_validation_unique_ids": None,
+        "id_validation_reason": None,
+        "error": error,
+        "output_file": None,
+        "checkpoint_file": None,
+    }
+
+
+def _prepare_runtime_spec(
+    spec: EndpointSpec,
+    *,
+    delta_enabled: bool,
+    delta_floor: str | None,
+    non_delta_modified_since: str | None,
+) -> EndpointSpec:
+    if delta_enabled:
+        return build_delta_endpoint_spec(spec, delta_floor, force_sort=True)
+
+    runtime_spec = apply_data_sort(spec, sort_value="_modified_at", policy="if_missing")
+    if non_delta_modified_since is not None:
+        runtime_spec = _apply_modified_since_filter(runtime_spec, non_delta_modified_since)
+    return runtime_spec
+
+
+def _resolve_resume_completed_hint(
+    *,
+    resume: bool,
+    delta_state: dict[str, Any] | None,
+    checkpoint_dir: Path,
+    endpoint_name: str,
+) -> bool | None:
+    if not resume or delta_state is None:
+        return None
+
+    checkpoint_path = checkpoint_dir / f"{_safe_checkpoint_name(endpoint_name)}.json"
+    checkpoint_completed_state = _read_checkpoint_completed_state(checkpoint_path)
+    if checkpoint_completed_state is not None:
+        return None
+    return _infer_resume_completed_hint(delta_state, endpoint_name)
+
+
+def _build_run_kwargs(
+    *,
+    resume: bool,
+    quiet: bool,
+    log_callback: LogCallback | None,
+    delta_enabled: bool,
+    delta_floor: str | None,
+    delta_state: dict[str, Any] | None,
+    checkpoint_dir: Path,
+    endpoint_name: str,
+) -> dict[str, Any]:
+    progress_callback = None if quiet else _write_progress_line
+    run_kwargs: dict[str, Any] = {
+        "resume": resume,
+        "progress_callback": progress_callback,
+    }
+
+    if log_callback is not None:
+        run_kwargs["api_log_callback"] = log_callback
+
+    if delta_enabled:
+        run_kwargs["append_output"] = True
+        run_kwargs["delta_floor"] = delta_floor
+        resume_completed_hint = _resolve_resume_completed_hint(
+            resume=resume,
+            delta_state=delta_state,
+            checkpoint_dir=checkpoint_dir,
+            endpoint_name=endpoint_name,
+        )
+        if resume_completed_hint is not None:
+            run_kwargs["resume_completed_hint"] = resume_completed_hint
+
+    return run_kwargs
+
+
+def _record_delta_endpoint_attempt(
+    *,
+    delta_state: dict[str, Any],
+    delta_state_file: Path,
+    delta_log_file: Path,
+    delta_endpoint_records: list[dict[str, Any]],
+    endpoint_name: str,
+    status: str,
+    delta_floor: str | None,
+    attempt_start: str,
+    attempt_start_dt: datetime,
+    update_delta_state: bool,
+    result: FetchRunResult | None = None,
+    error: str | None = None,
+) -> None:
+    attempt_end_dt = _utc_now()
+    attempt_end = _utc_iso(attempt_end_dt)
+    if update_delta_state:
+        _update_delta_state_for_endpoint(
+            delta_state,
+            endpoint_name=endpoint_name,
+            status=status,
+            attempt_start=attempt_start,
+            attempt_end=attempt_end,
+            error=error,
+        )
+        _write_delta_state(delta_state_file, delta_state)
+
+    endpoint_log_record = _build_delta_endpoint_log_record(
+        endpoint_name=endpoint_name,
+        status=status,
+        delta_floor=delta_floor,
+        attempt_start=attempt_start,
+        attempt_end=attempt_end,
+        duration_seconds=round((attempt_end_dt - attempt_start_dt).total_seconds(), 3),
+        result=result,
+        error=error,
+    )
+    _append_delta_log(delta_log_file, endpoint_log_record)
+    delta_endpoint_records.append(endpoint_log_record)
+
+
+def _record_endpoint_failure(
+    *,
+    endpoint_name: str,
+    message: str,
+    stderr_label: str,
+    attempt_start: str,
+    attempt_start_dt: datetime,
+    delta_floor: str | None,
+    failures: list[tuple[str, str]],
+    log_callback: LogCallback | None,
+    delta_state: dict[str, Any] | None,
+    delta_state_file: Path,
+    delta_log_file: Path,
+    delta_endpoint_records: list[dict[str, Any]],
+) -> None:
+    failures.append((endpoint_name, message))
+    print(f"[{endpoint_name}] {stderr_label}: {message}", file=sys.stderr)
+    if log_callback is not None:
+        log_callback(
+            {
+                "level": "summary",
+                "event": "endpoint_failed",
+                "endpoint": endpoint_name,
+                "error": message,
+                "duration_seconds": round((_utc_now() - attempt_start_dt).total_seconds(), 3),
+            }
+        )
+
+    if delta_state is not None:
+        status = _classify_delta_status(None, error=message)
+        _record_delta_endpoint_attempt(
+            delta_state=delta_state,
+            delta_state_file=delta_state_file,
+            delta_log_file=delta_log_file,
+            delta_endpoint_records=delta_endpoint_records,
+            endpoint_name=endpoint_name,
+            status=status,
+            delta_floor=delta_floor,
+            attempt_start=attempt_start,
+            attempt_start_dt=attempt_start_dt,
+            update_delta_state=True,
+            error=message,
+        )
+
+
+def _finalize_run(
+    *,
+    args: argparse.Namespace,
+    run_started: float,
+    run_started_dt: datetime,
+    selected_specs: list[EndpointSpec],
+    results: list[FetchRunResult],
+    failures: list[tuple[str, str]],
+    run_interrupted: bool,
+    delta_state: dict[str, Any] | None,
+    delta_log_file: Path,
+    delta_endpoint_records: list[dict[str, Any]],
+    log_callback: LogCallback | None,
+) -> int:
+    if args.delta and delta_state is not None and not args.delta_dry_run:
+        _append_delta_log(
+            delta_log_file,
+            _build_delta_run_summary_record(
+                run_started_at=run_started_dt,
+                run_finished_at=_utc_now(),
+                selected_specs=selected_specs,
+                results=results,
+                failures=failures,
+                endpoint_records=delta_endpoint_records,
+            ),
+        )
+
+    for result in results:
+        print(
+            json.dumps(
+                {
+                    "endpoint": result.endpoint,
+                    "status": "ok",
+                    "pages_fetched": result.pages_fetched,
+                    "items_fetched": result.items_fetched,
+                    "expected_count": result.expected_count,
+                    "count_validation": {
+                        "status": result.count_validation_status,
+                        "reason": result.count_validation_reason,
+                    },
+                    "retries_used": result.retries_used,
+                    "start_skip": result.start_skip,
+                    "next_skip": result.next_skip,
+                    "duration_seconds": round(result.duration_seconds, 3),
+                    "output_file": str(result.output_file),
+                    "checkpoint_file": str(result.checkpoint_file),
+                    "id_validation": {
+                        "status": result.id_validation_status,
+                        "checked_items": result.id_validation_checked_items,
+                        "unique_ids": result.id_validation_unique_ids,
+                        "reason": result.id_validation_reason,
+                    },
+                    "warnings": result.warnings,
+                }
+            )
+        )
+
+    run_duration_seconds = time.time() - run_started
+    if not args.quiet and not args.delta_dry_run:
+        _print_run_summary(
+            selected_count=len(selected_specs),
+            results=results,
+            failures=failures,
+            duration_seconds=run_duration_seconds,
+        )
+
+    exit_code = 130 if run_interrupted else (1 if failures else 0)
+
+    if log_callback is not None:
+        log_callback(
+            {
+                "level": "summary",
+                "event": "run_finish",
+                "mode": (
+                    "delta_dry_run"
+                    if args.delta_dry_run
+                    else ("delta" if args.delta else "standard")
+                ),
+                "duration_seconds": round(run_duration_seconds, 3),
+                "endpoints_total": len(selected_specs),
+                "endpoints_succeeded": len(results),
+                "endpoints_failed": len(failures),
+                "exit_code": exit_code,
+            }
+        )
+
+    return exit_code
+
+
+def _run(args: argparse.Namespace) -> int:
+    run_started = time.time()
+    run_started_dt = _utc_now()
+    if args.delta_dry_run:
+        args.delta = True
+    if args.months is not None and args.delta:
+        raise ConfigError(
+            "--months is only supported in non-delta mode (without --delta/--delta-dry-run)."
+        )
+
+    fetcher_cfg, auth_settings, endpoint_specs = load_fetcher_settings(args.config)
+
+    if args.output_dir:
+        fetcher_cfg.output_dir = Path(args.output_dir)
+    if args.checkpoint_dir:
+        fetcher_cfg.checkpoint_dir = Path(args.checkpoint_dir)
+
+    selected_specs = _select_endpoints(endpoint_specs, args.endpoint)
+
+    failures: list[tuple[str, str]] = []
+    results: list[FetchRunResult] = []
+    run_interrupted = False
+    delta_endpoint_records: list[dict[str, Any]] = []
+    delta_state_file = Path(args.delta_state_file)
+    delta_log_file = _DEFAULT_DELTA_LOG_PATH
+    delta_state = _load_delta_state(delta_state_file) if args.delta else None
+    delta_overlap_minutes = _DEFAULT_DELTA_OVERLAP_MINUTES
+    delta_overlap_days = _DEFAULT_DELTA_OVERLAP_DAYS
+    if args.delta and delta_state is not None:
+        delta_overlap_minutes, delta_overlap_days = _resolve_delta_overlaps(delta_state)
+    non_delta_modified_since = (
+        _utc_iso(_subtract_calendar_months(run_started_dt, args.months))
+        if args.months is not None
+        else None
+    )
+
+    fetch_log_file: TextIO | None = None
+    log_callback: LogCallback | None = None
+    if args.log_level != "off":
+        log_path = Path(args.log_file) if args.log_file else _DEFAULT_FETCH_LOG_PATH
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        fetch_log_file = log_path.open("a", encoding="utf-8")
+        log_callback = _build_log_callback(
+            fetch_log_file,
+            log_level=args.log_level,
+            log_format=args.log_format,
+        )
+
+    try:
+        if log_callback is not None:
+            log_callback(
+                {
+                    "level": "summary",
+                    "event": "run_start",
+                    "mode": "delta_dry_run"
+                    if args.delta_dry_run
+                    else ("delta" if args.delta else "standard"),
+                    "selected_endpoints": [spec.name for spec in selected_specs],
+                    "resume": args.resume,
+                }
+            )
+        with init_auth_context(
+            auth_settings,
+            timeout=args.timeout,
+            env_file=Path(args.env_file) if args.env_file else None,
+        ) as auth_ctx:
+            fetcher_cfg.base_url = auth_ctx.base_url
+            fetcher_cfg.timeout = auth_ctx.timeout
+
+            for spec in selected_specs:
+                attempt_start_dt = _utc_now()
+                attempt_start = _utc_iso(attempt_start_dt)
+                delta_floor = (
+                    _derive_delta_floor(
+                        delta_state,
+                        spec.name,
+                        delta_overlap_minutes,
+                        delta_overlap_days,
+                    )
+                    if args.delta and delta_state
+                    else None
+                )
+                runtime_spec = _prepare_runtime_spec(
+                    spec,
+                    delta_enabled=args.delta,
+                    delta_floor=delta_floor,
+                    non_delta_modified_since=non_delta_modified_since,
+                )
+                if log_callback is not None:
+                    log_callback(
+                        {
+                            "level": "debug",
+                            "event": "endpoint_runtime_prepared",
+                            "endpoint": spec.name,
+                            "delta_floor": delta_floor,
+                            "non_delta_modified_since": (
+                                non_delta_modified_since if not args.delta else None
+                            ),
+                            "sort": runtime_spec.query_params.get("sort"),
+                            "delta_overlap_days": delta_overlap_days if args.delta else None,
+                            "delta_overlap_minutes": delta_overlap_minutes if args.delta else None,
+                            "mode": "delta" if args.delta else "standard",
+                        }
+                    )
+
+                if args.delta_dry_run:
+                    data_modified = runtime_spec.query_params.get("_modified_at=ge")
+                    count_modified = (
+                        runtime_spec.count_spec.query_params.get("_modified_at=ge")
+                        if runtime_spec.count_spec is not None
+                        else None
+                    )
+                    if not args.quiet:
+                        print(
+                            f"[{spec.name}] delta dry-run: floor={delta_floor or 'none'} "
+                            f"overlap_days={delta_overlap_days} "
+                            f"overlap_minutes={delta_overlap_minutes} "
+                            f"data_modified_at={data_modified or 'none'} "
+                            f"count_modified_at={count_modified or 'none'}",
+                            file=sys.stderr,
+                        )
+                    print(
+                        json.dumps(
+                            {
+                                "endpoint": spec.name,
+                                "status": "delta_dry_run",
+                                "overlap_days": delta_overlap_days,
+                                "overlap_minutes": delta_overlap_minutes,
+                                "delta_floor": delta_floor,
+                                "data_modified_at": data_modified,
+                                "count_modified_at": count_modified,
+                            }
+                        )
+                    )
+                    if log_callback is not None:
+                        log_callback(
+                            {
+                                "level": "summary",
+                                "event": "endpoint_dry_run",
+                                "endpoint": spec.name,
+                                "delta_floor": delta_floor,
+                                "data_modified_at": data_modified,
+                                "count_modified_at": count_modified,
+                                "overlap_days": delta_overlap_days,
+                                "overlap_minutes": delta_overlap_minutes,
+                            }
+                        )
+                    continue
+
+                try:
+                    run_kwargs = _build_run_kwargs(
+                        resume=args.resume,
+                        quiet=args.quiet,
+                        log_callback=log_callback,
+                        delta_enabled=args.delta,
+                        delta_floor=delta_floor,
+                        delta_state=delta_state if args.delta else None,
+                        checkpoint_dir=fetcher_cfg.checkpoint_dir,
+                        endpoint_name=spec.name,
+                    )
+                    if log_callback is not None:
+                        log_callback(
+                            {
+                                "level": "summary",
+                                "event": "endpoint_start",
+                                "endpoint": spec.name,
+                                "delta_floor": delta_floor,
+                                "resume": args.resume,
+                                "mode": "delta" if args.delta else "standard",
+                            }
+                        )
+                    result = run_endpoint(runtime_spec, auth_ctx, fetcher_cfg, **run_kwargs)
+                    results.append(result)
+                    if log_callback is not None:
+                        log_callback(
+                            {
+                                "level": "summary",
+                                "event": "endpoint_finish",
+                                "endpoint": spec.name,
+                                "pages_fetched": result.pages_fetched,
+                                "items_fetched": result.items_fetched,
+                                "retries_used": result.retries_used,
+                                "duration_seconds": round(result.duration_seconds, 3),
+                                "already_completed": result.already_completed,
+                                "did_catch_up": result.did_catch_up,
+                                "count_validation_status": result.count_validation_status,
+                                "count_validation_reason": result.count_validation_reason,
+                                "id_validation_status": result.id_validation_status,
+                                "id_validation_checked_items": result.id_validation_checked_items,
+                                "id_validation_unique_ids": result.id_validation_unique_ids,
+                                "id_validation_reason": result.id_validation_reason,
+                            }
+                        )
+
+                    if args.delta and delta_state is not None:
+                        status = _classify_delta_status(result, error=None)
+                        should_update_delta_state = not (args.resume and result.already_completed)
+                        _record_delta_endpoint_attempt(
+                            delta_state=delta_state,
+                            delta_state_file=delta_state_file,
+                            delta_log_file=delta_log_file,
+                            delta_endpoint_records=delta_endpoint_records,
+                            endpoint_name=spec.name,
+                            status=status,
+                            delta_floor=delta_floor,
+                            attempt_start=attempt_start,
+                            attempt_start_dt=attempt_start_dt,
+                            update_delta_state=should_update_delta_state,
+                            result=result,
+                        )
+                except (FetchError, AuthError) as exc:
+                    _record_endpoint_failure(
+                        endpoint_name=spec.name,
+                        message=str(exc),
+                        stderr_label="error",
+                        attempt_start=attempt_start,
+                        attempt_start_dt=attempt_start_dt,
+                        delta_floor=delta_floor,
+                        failures=failures,
+                        log_callback=log_callback,
+                        delta_state=delta_state if args.delta else None,
+                        delta_state_file=delta_state_file,
+                        delta_log_file=delta_log_file,
+                        delta_endpoint_records=delta_endpoint_records,
+                    )
+                except KeyboardInterrupt:
+                    run_interrupted = True
+                    _record_endpoint_failure(
+                        endpoint_name=spec.name,
+                        message=_RUN_INTERRUPTED_MESSAGE,
+                        stderr_label="interrupted",
+                        attempt_start=attempt_start,
+                        attempt_start_dt=attempt_start_dt,
+                        delta_floor=delta_floor,
+                        failures=failures,
+                        log_callback=log_callback,
+                        delta_state=delta_state if args.delta else None,
+                        delta_state_file=delta_state_file,
+                        delta_log_file=delta_log_file,
+                        delta_endpoint_records=delta_endpoint_records,
+                    )
+                    break
+
+        return _finalize_run(
+            args=args,
+            run_started=run_started,
+            run_started_dt=run_started_dt,
+            selected_specs=selected_specs,
+            results=results,
+            failures=failures,
+            run_interrupted=run_interrupted,
+            delta_state=delta_state,
+            delta_log_file=delta_log_file,
+            delta_endpoint_records=delta_endpoint_records,
+            log_callback=log_callback,
+        )
+    finally:
+        if fetch_log_file is not None:
+            fetch_log_file.close()
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        if args.command == "run":
+            return _run(args)
+    except KeyboardInterrupt:
+        print(f"Run {_RUN_INTERRUPTED_MESSAGE}", file=sys.stderr)
+        return 130
+    except (ConfigError, AuthError, FetchError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    parser.error(f"Unknown command: {args.command}")
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

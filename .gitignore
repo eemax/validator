@@ -28,14 +28,17 @@ build/
 config/*credentials*.json
 config/*token*.json
 config/*secret*.json
+config/delta_fetcher.yaml
 config/local*.yml
 config/local*.yaml
 
 # Generated runtime artifacts
+data/checkpoints/*
 data/raw/*
 data/results/*
 reports/*
 
+!data/checkpoints/.gitkeep
 !data/raw/.gitkeep
 !data/results/.gitkeep
 !reports/.gitkeep

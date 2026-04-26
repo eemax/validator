@@ -3,7 +3,7 @@ from typing import Annotated
 
 import typer
 
-from centric_mdm_validation.centric import CentricEndpointConfig, fetch_endpoint
+from centric_mdm_validation.centric.cli import main as fetcher_main
 from centric_mdm_validation.io import read_json_records, write_json
 from centric_mdm_validation.models import CentricProductPayload
 from centric_mdm_validation.reporting import DppReadinessReporter
@@ -17,26 +17,14 @@ RulesOption = Annotated[
 ]
 
 
-@app.command()
-def fetch(
-    config: Annotated[
-        Path,
-        typer.Option("--config", "-c", help="Centric fetch YAML config."),
-    ],
-    output: Annotated[
-        Path,
-        typer.Option("--output", "-o", help="JSONL file to write."),
-    ],
-    endpoint: Annotated[
-        str | None,
-        typer.Option("--endpoint", "-e", help="Endpoint name."),
-    ] = None,
-) -> None:
-    """Fetch one Centric endpoint to JSONL."""
+@app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def fetch(ctx: typer.Context) -> None:
+    """Run Centric fetch jobs. Accepts the same arguments as `centric-fetch run`."""
 
-    endpoint_config = CentricEndpointConfig.from_yaml(config, endpoint)
-    count = fetch_endpoint(endpoint_config, output)
-    typer.echo(f"Fetched {count} records from {endpoint_config.name} into {output}")
+    args = list(ctx.args)
+    if not args or args[0] != "run":
+        args.insert(0, "run")
+    raise typer.Exit(fetcher_main(args))
 
 
 @app.command()

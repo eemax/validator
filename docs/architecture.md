@@ -18,14 +18,23 @@ Centric API or export
 
 ## Near-Term Modules
 
-- `centric`: API fetch shell and, later, robust checkpoint/delta behavior.
+- `centric`: API fetcher, auth, config, checkpoint/resume, delta mode, and fetch integrity.
 - `validation`: rule loading and readiness checks.
 - `reporting`: brand/product/issue exports.
 - `models`: normalized payload and result contracts.
 
+## Fetcher Contract
+
+- Fetch configs define endpoint behavior, output directories, checkpoints, retry settings, and
+  optional `.env` path only.
+- `CENTRIC_BASE_URL`, `CENTRIC_USERNAME`, and `CENTRIC_PASSWORD` come from process environment
+  or `.env`, never from fetch config.
+- Session tokens are process memory only. No token cache file is written.
+- The `archive-output` feature from `~/centric-api-fetcher` is intentionally omitted.
+
 ## Next Technical Steps
 
 1. Add a Centric raw-to-projected mapper using real payloads.
-2. Move token/cache/retry/checkpoint behavior from the fetcher reference repo.
+2. Add richer project-specific endpoint examples once the exact Centric payloads are finalized.
 3. Add DuckDB-backed report queries once result history spans multiple runs.
 4. Add trend reports by season, brand, product type, and rule-set version.

@@ -19,6 +19,7 @@ dependencies = [
 
 [project.scripts]
 centric-mdm = "centric_mdm_validation.cli:app"
+centric-fetch = "centric_mdm_validation.centric.cli:main"
 
 [dependency-groups]
 dev = [
