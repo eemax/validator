@@ -32,6 +32,24 @@ uv run centric-mdm validate \
   --output data/results/dpp-readiness-results.json
 ```
 
+## Project Fetched Centric Data
+
+```bash
+uv run centric-mdm project \
+  --input-dir data/raw \
+  --output data/results/projected-products.jsonl
+```
+
+Company-specific Centric attribute names should live outside the public repo. The project looks
+for projection mappings in this order:
+
+1. `--mapping /path/to/private/field-mapping.yml`
+2. `CENTRIC_FIELD_MAPPING=/path/to/private/field-mapping.yml`
+3. `.local/field-mapping.yml`
+
+Use `config/field-mapping.example.yml` as the public template. `.local/` is gitignored for
+repo-adjacent private mappings.
+
 ## Create DPP Reports
 
 ```bash
@@ -65,14 +83,24 @@ not written to disk. `CENTRIC_TOKEN` can be provided as an initial in-memory tok
 Run the fetcher through either CLI:
 
 ```bash
-uv run centric-fetch run --config config/centric.example.yml --endpoint styles
-uv run centric-mdm fetch --config config/centric.example.yml --endpoint styles
+uv run centric-fetch run --config config/fetcher.example.yml --endpoint styles
+uv run centric-mdm fetch --config config/fetcher.example.yml --endpoint styles
 ```
+
+Installation-specific fetch filters should also live outside the public repo. The fetcher looks
+for private params in this order:
+
+1. `--params /path/to/private/fetch-params.yml`
+2. `CENTRIC_FETCH_PARAMS=/path/to/private/fetch-params.yml`
+3. `.local/fetch-params.yml`
+
+Use `config/fetch-params.example.yml` as the public template.
 
 Useful modes inherited from the standalone fetcher:
 
 - `--resume` continues from endpoint checkpoints.
-- `--delta` uses `_modified_at` floors from `config/delta_fetcher.yaml`.
+- `--delta` uses `_modified_at` floors from the delta state file
+  (`config/delta_fetcher.yaml` by default; see `config/delta_fetcher.example.yml`).
 - `--delta-dry-run` shows injected delta filters without fetching data.
 - `--months 24` fetches records modified in the last 24 calendar months.
 - `--log-level summary|http|debug` enables structured fetch logs.

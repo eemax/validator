@@ -22,8 +22,6 @@ endpoints:
   - name: styles
     api_version: v2
     path: styles
-    query_params:
-      active: true
     skip_param: skip
     limit_param: limit
     limit: 10
@@ -31,8 +29,6 @@ endpoints:
     count_spec:
       api_version: v2
       path: count/Style
-      query_params:
-        active: true
       result_path: $.count
   - name: materials
     api_version: v2

@@ -2,7 +2,12 @@ from pathlib import Path
 
 import pytest
 
-from centric_mdm_validation.centric.config import ConfigError, load_fetcher_settings
+from centric_mdm_validation.centric.config import (
+    FETCH_PARAMS_ENV_VAR,
+    ConfigError,
+    load_fetcher_settings,
+    resolve_fetch_params_path,
+)
 
 
 def _write_config(path: Path, text: str) -> Path:
@@ -83,3 +88,52 @@ endpoints:
     assert endpoints[0].name == "styles"
     assert endpoints[0].item_path == "$.items"
     assert endpoints[0].count_spec is not None
+
+
+def test_load_fetcher_settings_applies_private_params_overlay(tmp_path: Path) -> None:
+    config = _write_config(
+        tmp_path / "fetcher.yml",
+        """
+endpoints:
+  - name: styles
+    api_version: v2
+    path: styles
+    query_params:
+      active: true
+    count_spec:
+      api_version: v2
+      path: count/Style
+      query_params:
+        active: true
+      result_path: $.count
+""",
+    )
+    params = _write_config(
+        tmp_path / "fetch-params.yml",
+        """
+endpoints:
+  styles:
+    query_params:
+      custom_status: approved
+    count_query_params:
+      custom_status: approved
+""",
+    )
+
+    _, _, endpoints = load_fetcher_settings(config, params_path=params)
+
+    assert endpoints[0].query_params == {"active": True, "custom_status": "approved"}
+    assert endpoints[0].count_spec is not None
+    assert endpoints[0].count_spec.query_params == {
+        "active": True,
+        "custom_status": "approved",
+    }
+
+
+def test_fetch_params_path_prefers_explicit_then_env(tmp_path: Path, monkeypatch) -> None:
+    explicit = tmp_path / "explicit.yml"
+    env_path = tmp_path / "env.yml"
+    monkeypatch.setenv(FETCH_PARAMS_ENV_VAR, str(env_path))
+
+    assert resolve_fetch_params_path(explicit) == explicit
+    assert resolve_fetch_params_path() == env_path

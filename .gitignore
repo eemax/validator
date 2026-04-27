@@ -25,9 +25,7 @@ build/
 .env
 .env.*
 !.env.example
-config/*credentials*.json
-config/*token*.json
-config/*secret*.json
+.local/
 config/delta_fetcher.yaml
 config/local*.yml
 config/local*.yaml

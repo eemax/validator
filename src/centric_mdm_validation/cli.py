@@ -4,6 +4,7 @@ from typing import Annotated
 import typer
 
 from centric_mdm_validation.centric.cli import main as fetcher_main
+from centric_mdm_validation.centric.mapper import write_projected_products
 from centric_mdm_validation.io import read_json_records, write_json
 from centric_mdm_validation.models import CentricProductPayload
 from centric_mdm_validation.reporting import DppReadinessReporter
@@ -25,6 +26,31 @@ def fetch(ctx: typer.Context) -> None:
     if not args or args[0] != "run":
         args.insert(0, "run")
     raise typer.Exit(fetcher_main(args))
+
+
+@app.command()
+def project(
+    input_dir: Annotated[
+        Path,
+        typer.Option(
+            "--input-dir",
+            "-i",
+            help="Directory containing fetched endpoint JSONL files.",
+        ),
+    ] = Path("data/raw"),
+    output: Annotated[
+        Path,
+        typer.Option("--output", "-o", help="Projected product JSONL."),
+    ] = Path("data/results/projected-products.jsonl"),
+    mapping: Annotated[
+        Path | None,
+        typer.Option("--mapping", "-m", help="Optional local projection field mapping YAML."),
+    ] = None,
+) -> None:
+    """Project fetched Centric endpoint payloads into validator product payloads."""
+
+    payloads = write_projected_products(input_dir, output, mapping)
+    typer.echo(f"Projected {len(payloads)} products from {input_dir} into {output}")
 
 
 @app.command()

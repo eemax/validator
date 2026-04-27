@@ -14,7 +14,7 @@ from typing import Any, Literal, TextIO
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .auth import AuthError, init_auth_context
-from .config import ConfigError, load_fetcher_settings
+from .config import ConfigError, load_fetcher_settings, resolve_fetch_params_path
 from .delta import apply_data_sort, build_delta_endpoint_spec, strip_modified_at_filters
 from .fetcher import FetchError, run_endpoint
 from .models import EndpointSpec, FetchProgressEvent, FetchRunResult
@@ -344,6 +344,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
     run_parser = subparsers.add_parser("run", help="Run fetch jobs for one or more endpoints")
     run_parser.add_argument("--config", required=True, help="Path to JSON/YAML fetcher config")
+    run_parser.add_argument(
+        "--params",
+        default=None,
+        help=(
+            "Optional private fetch params YAML. Defaults to CENTRIC_FETCH_PARAMS "
+            "or .local/fetch-params.yml when present."
+        ),
+    )
     run_parser.add_argument(
         "--endpoint",
         action="append",
@@ -896,7 +904,10 @@ def _run(args: argparse.Namespace) -> int:
             "--months is only supported in non-delta mode (without --delta/--delta-dry-run)."
         )
 
-    fetcher_cfg, auth_settings, endpoint_specs = load_fetcher_settings(args.config)
+    fetcher_cfg, auth_settings, endpoint_specs = load_fetcher_settings(
+        args.config,
+        params_path=resolve_fetch_params_path(args.params),
+    )
 
     if args.output_dir:
         fetcher_cfg.output_dir = Path(args.output_dir)

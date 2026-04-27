@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from .models import AuthSettings, CountSpec, EndpointSpec, FetcherConfig
+
+FETCH_PARAMS_ENV_VAR = "CENTRIC_FETCH_PARAMS"
+LOCAL_FETCH_PARAMS_PATH = Path(".local/fetch-params.yml")
 
 
 class ConfigError(ValueError):
@@ -193,8 +198,101 @@ def _ensure_unique_names(specs: Iterable[EndpointSpec]) -> None:
         seen.add(spec.name)
 
 
+def resolve_fetch_params_path(path: str | Path | None = None) -> Path | None:
+    if path is not None:
+        return Path(path)
+
+    env_path = os.environ.get(FETCH_PARAMS_ENV_VAR)
+    if env_path and env_path.strip():
+        return Path(env_path.strip())
+
+    if LOCAL_FETCH_PARAMS_PATH.is_file():
+        return LOCAL_FETCH_PARAMS_PATH
+    return None
+
+
+def _overlay_params(base: dict[str, Any], overlay: Any, *, field_name: str) -> dict[str, Any]:
+    overlay_dict = _as_dict(overlay, field_name=field_name)
+    return {**base, **overlay_dict}
+
+
+def _normalize_endpoint_param_overlays(raw_endpoints: Any) -> dict[str, dict[str, Any]]:
+    if raw_endpoints is None:
+        return {}
+    if isinstance(raw_endpoints, dict):
+        return {
+            str(name): _as_dict(value, field_name=f"endpoints.{name}")
+            for name, value in raw_endpoints.items()
+        }
+    if isinstance(raw_endpoints, list):
+        overlays: dict[str, dict[str, Any]] = {}
+        for raw in raw_endpoints:
+            item = _as_dict(raw, field_name="endpoints[]")
+            name = item.get("name")
+            if not isinstance(name, str) or not name.strip():
+                raise ConfigError("Each params endpoint entry must include a non-empty name.")
+            overlays[name.strip()] = item
+        return overlays
+    raise ConfigError("params endpoints must be an object or array.")
+
+
+def apply_fetch_params(
+    endpoints: list[EndpointSpec],
+    params_path: str | Path | None = None,
+) -> list[EndpointSpec]:
+    if params_path is None:
+        return endpoints
+    resolved_path = Path(params_path)
+    if not resolved_path.is_file():
+        raise ConfigError(f"Fetch params file not found: {resolved_path}")
+
+    payload = _load_payload(resolved_path)
+    overlays = _normalize_endpoint_param_overlays(payload.get("endpoints"))
+    if not overlays:
+        return endpoints
+
+    known_names = {endpoint.name for endpoint in endpoints}
+    unknown_names = sorted(set(overlays) - known_names)
+    if unknown_names:
+        raise ConfigError(f"Params file references unknown endpoints: {', '.join(unknown_names)}")
+
+    merged_endpoints: list[EndpointSpec] = []
+    for endpoint in endpoints:
+        overlay = overlays.get(endpoint.name)
+        if overlay is None:
+            merged_endpoints.append(endpoint)
+            continue
+
+        query_params = _overlay_params(
+            endpoint.query_params,
+            overlay.get("query_params"),
+            field_name=f"params endpoint[{endpoint.name}].query_params",
+        )
+        next_count_spec = endpoint.count_spec
+        if next_count_spec is not None:
+            count_overlay = overlay.get("count_query_params", overlay.get("query_params"))
+            next_count_spec = replace(
+                next_count_spec,
+                query_params=_overlay_params(
+                    next_count_spec.query_params,
+                    count_overlay,
+                    field_name=f"params endpoint[{endpoint.name}].count_query_params",
+                ),
+            )
+
+        merged_endpoints.append(
+            replace(
+                endpoint,
+                query_params=query_params,
+                count_spec=next_count_spec,
+            )
+        )
+    return merged_endpoints
+
+
 def load_fetcher_settings(
     path: str | Path,
+    params_path: str | Path | None = None,
 ) -> tuple[FetcherConfig, AuthSettings, list[EndpointSpec]]:
     config_path = Path(path)
     payload = _load_payload(config_path)
@@ -213,4 +311,5 @@ def load_fetcher_settings(
         raise ConfigError("Config must contain at least one endpoint.")
 
     _ensure_unique_names(endpoints)
+    endpoints = apply_fetch_params(endpoints, params_path)
     return fetcher_cfg, auth_settings, endpoints
