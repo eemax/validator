@@ -23,12 +23,11 @@ def test_resolve_credentials_reads_dotenv_without_config_file(tmp_path: Path, mo
     monkeypatch.delenv("CENTRIC_USERNAME", raising=False)
     monkeypatch.delenv("CENTRIC_PASSWORD", raising=False)
 
-    base_url, username, password, token = resolve_credentials(AuthSettings(env_file=env_file))
+    base_url, username, password = resolve_credentials(AuthSettings(env_file=env_file))
 
     assert base_url == "https://file.example.com"
     assert username == "file_user"
     assert password == "file_pass"
-    assert token is None
 
 
 def test_environment_overrides_dotenv(tmp_path: Path, monkeypatch) -> None:
@@ -41,7 +40,7 @@ def test_environment_overrides_dotenv(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("CENTRIC_USERNAME", "env_user")
     monkeypatch.setenv("CENTRIC_PASSWORD", "env_pass")
 
-    base_url, username, password, _ = resolve_credentials(AuthSettings(env_file=env_file))
+    base_url, username, password = resolve_credentials(AuthSettings(env_file=env_file))
 
     assert base_url == "https://env.example.com"
     assert username == "env_user"
@@ -86,15 +85,24 @@ def test_auth_context_keeps_token_in_memory_and_refreshes_on_401(tmp_path: Path)
 def test_init_auth_context_accepts_env_file(tmp_path: Path, monkeypatch) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "CENTRIC_BASE_URL=https://file.example.com\nCENTRIC_TOKEN=provided_token\n",
+        "\n".join(
+            [
+                "CENTRIC_BASE_URL=https://file.example.com",
+                "CENTRIC_USERNAME=file_user",
+                "CENTRIC_PASSWORD=file_pass",
+            ]
+        ),
         encoding="utf-8",
     )
     monkeypatch.delenv("CENTRIC_BASE_URL", raising=False)
-    monkeypatch.delenv("CENTRIC_TOKEN", raising=False)
+    monkeypatch.delenv("CENTRIC_USERNAME", raising=False)
+    monkeypatch.delenv("CENTRIC_PASSWORD", raising=False)
 
     ctx = init_auth_context(AuthSettings(), env_file=env_file)
     try:
         assert ctx.base_url == "https://file.example.com"
-        assert ctx.token == "provided_token"
+        assert ctx.username == "file_user"
+        assert ctx.password == "file_pass"
+        assert ctx.token is None
     finally:
         ctx.close()

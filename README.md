@@ -75,8 +75,8 @@ export CENTRIC_USERNAME="your-user"
 export CENTRIC_PASSWORD="your-password"
 ```
 
-The session token is kept in memory for the current process. It is refreshed on `401` and is
-not written to disk. `CENTRIC_TOKEN` can be provided as an initial in-memory token when needed.
+The session token is created from `CENTRIC_USERNAME` / `CENTRIC_PASSWORD`, kept in memory for
+the current process, refreshed on `401`, and never written to disk.
 
 Run the fetcher through either CLI:
 

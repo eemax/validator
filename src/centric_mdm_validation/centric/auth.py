@@ -61,16 +61,15 @@ def _env_value(key: str, env_file_values: dict[str, str]) -> str | None:
 def resolve_credentials(
     settings: AuthSettings,
     env_file: Path | None = None,
-) -> tuple[str, str | None, str | None, str | None]:
+) -> tuple[str, str | None, str | None]:
     env_values = _read_env_file(env_file or settings.env_file)
     base_url = _env_value("CENTRIC_BASE_URL", env_values)
     username = _env_value("CENTRIC_USERNAME", env_values)
     password = _env_value("CENTRIC_PASSWORD", env_values)
-    token = _env_value("CENTRIC_TOKEN", env_values)
 
     if not base_url:
         raise AuthError("Missing CENTRIC_BASE_URL in environment or env file.")
-    return _normalize_base_url(base_url), username, password, token
+    return _normalize_base_url(base_url), username, password
 
 
 def _extract_token(token_value: str) -> str:
@@ -90,7 +89,6 @@ class AuthContext:
         username: str | None,
         password: str | None,
         timeout: float,
-        initial_token: str | None = None,
         client: httpx.Client | None = None,
     ) -> None:
         self.base_url = _normalize_base_url(base_url)
@@ -99,7 +97,7 @@ class AuthContext:
         self.timeout = timeout
         self.client = client or httpx.Client(timeout=timeout)
         self._owns_client = client is None
-        self.token = initial_token
+        self.token: str | None = None
 
     def close(self) -> None:
         if self._owns_client:
@@ -115,7 +113,7 @@ class AuthContext:
         if self.token:
             return self.token
         if not self.username or not self.password:
-            raise AuthError("Token missing and CENTRIC_USERNAME/CENTRIC_PASSWORD unavailable.")
+            raise AuthError("CENTRIC_USERNAME/CENTRIC_PASSWORD are required to create a session.")
         self.token = self.get_token()
         return self.token
 
@@ -191,12 +189,11 @@ def init_auth_context(
     if env_file is not None:
         merged.env_file = env_file
 
-    base_url, username, password, token = resolve_credentials(merged, env_file=merged.env_file)
+    base_url, username, password = resolve_credentials(merged, env_file=merged.env_file)
     return AuthContext(
         base_url=base_url,
         username=username,
         password=password,
         timeout=merged.timeout,
-        initial_token=token,
         client=client,
     )

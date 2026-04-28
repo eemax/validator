@@ -13,16 +13,17 @@ def no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("centric_mdm_validation.centric.fetcher._sleep_backoff", lambda *_: None)
 
 
-def _make_auth_ctx(tmp_path: Path, handler, *, token: str = "token") -> AuthContext:
+def _make_auth_ctx(tmp_path: Path, handler) -> AuthContext:
     client = httpx.Client(transport=httpx.MockTransport(handler), timeout=5.0)
-    return AuthContext(
+    ctx = AuthContext(
         base_url="https://centric.example.com",
         username="user",
         password="pass",
         timeout=5.0,
-        initial_token=token,
         client=client,
     )
+    ctx.token = "token"
+    return ctx
 
 
 def _make_fetcher_cfg(tmp_path: Path, **overrides) -> FetcherConfig:
