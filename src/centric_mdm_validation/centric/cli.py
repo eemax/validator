@@ -14,13 +14,18 @@ from typing import Any, Literal, TextIO
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .auth import AuthError, init_auth_context
-from .config import ConfigError, load_fetcher_settings, resolve_fetch_params_path
+from .config import (
+    ConfigError,
+    load_fetcher_settings,
+    resolve_fetch_params_path,
+    resolve_private_config_path,
+)
 from .delta import apply_data_sort, build_delta_endpoint_spec, strip_modified_at_filters
 from .fetcher import FetchError, run_endpoint
 from .models import EndpointSpec, FetchProgressEvent, FetchRunResult
 
 _DELTA_STATE_VERSION = 1
-_DEFAULT_DELTA_STATE_PATH = Path("config/delta_fetcher.yaml")
+_DEFAULT_DELTA_STATE_CONFIG_PATH = Path("delta_fetcher.yml")
 _DEFAULT_DELTA_LOG_PATH = Path("data/delta.log")
 _DEFAULT_FETCH_LOG_PATH = Path("fetcher.log")
 _DEFAULT_DELTA_OVERLAP_MINUTES = 60
@@ -348,8 +353,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--params",
         default=None,
         help=(
-            "Optional private fetch params YAML. Defaults to CENTRIC_FETCH_PARAMS "
-            "or .local/fetch-params.yml when present."
+            "Optional private fetch params YAML. Defaults to "
+            "CENTRIC_CONFIG_DIR/fetch-params.yml or .local/fetch-params.yml when present."
         ),
     )
     run_parser.add_argument(
@@ -380,8 +385,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument(
         "--delta-state-file",
-        default=str(_DEFAULT_DELTA_STATE_PATH),
-        help=f"Delta state YAML path (default: {_DEFAULT_DELTA_STATE_PATH}).",
+        default=None,
+        help=(
+            "Delta state YAML path. Defaults to CENTRIC_CONFIG_DIR/delta_fetcher.yml "
+            "or .local/delta_fetcher.yml."
+        ),
     )
     run_parser.add_argument(
         "--delta-dry-run",
@@ -424,7 +432,10 @@ def _build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "--env-file",
         default=None,
-        help="Optional .env path for CENTRIC_BASE_URL, CENTRIC_USERNAME, and CENTRIC_PASSWORD.",
+        help=(
+            "Optional env file path for CENTRIC_BASE_URL, CENTRIC_USERNAME, "
+            "and CENTRIC_PASSWORD."
+        ),
     )
     run_parser.add_argument("--timeout", type=float, default=None)
 
@@ -920,7 +931,10 @@ def _run(args: argparse.Namespace) -> int:
     results: list[FetchRunResult] = []
     run_interrupted = False
     delta_endpoint_records: list[dict[str, Any]] = []
-    delta_state_file = Path(args.delta_state_file)
+    delta_state_file = resolve_private_config_path(
+        _DEFAULT_DELTA_STATE_CONFIG_PATH,
+        args.delta_state_file,
+    )
     delta_log_file = _DEFAULT_DELTA_LOG_PATH
     delta_state = _load_delta_state(delta_state_file) if args.delta else None
     delta_overlap_minutes = _DEFAULT_DELTA_OVERLAP_MINUTES

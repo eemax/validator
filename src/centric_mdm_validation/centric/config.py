@@ -9,8 +9,10 @@ from typing import Any
 
 from .models import AuthSettings, CountSpec, EndpointSpec, FetcherConfig
 
-FETCH_PARAMS_ENV_VAR = "CENTRIC_FETCH_PARAMS"
-LOCAL_FETCH_PARAMS_PATH = Path(".local/fetch-params.yml")
+CONFIG_DIR_ENV_VAR = "CENTRIC_CONFIG_DIR"
+LOCAL_CONFIG_DIR = Path(".local")
+FETCH_PARAMS_CONFIG_PATH = Path("fetch-params.yml")
+LOCAL_ENV_CONFIG_PATH = Path("local.env")
 
 
 class ConfigError(ValueError):
@@ -184,10 +186,18 @@ def _build_fetcher_config(raw: dict[str, Any]) -> FetcherConfig:
 
 
 def _build_auth_settings(raw: dict[str, Any], fetcher_cfg: FetcherConfig) -> AuthSettings:
-    env_file = raw.get("env_file", ".env")
+    env_file = raw.get("env_file")
+    if env_file is None:
+        return AuthSettings(
+            timeout=fetcher_cfg.timeout,
+            env_file=resolve_private_config_path(LOCAL_ENV_CONFIG_PATH),
+        )
     if not isinstance(env_file, str) or not env_file.strip():
         raise ConfigError("env_file must be a non-empty string when provided.")
-    return AuthSettings(timeout=fetcher_cfg.timeout, env_file=Path(env_file))
+    env_path = Path(env_file.strip())
+    if env_path.is_absolute() or env_path.parent != Path("."):
+        return AuthSettings(timeout=fetcher_cfg.timeout, env_file=env_path)
+    return AuthSettings(timeout=fetcher_cfg.timeout, env_file=resolve_private_config_path(env_path))
 
 
 def _ensure_unique_names(specs: Iterable[EndpointSpec]) -> None:
@@ -198,17 +208,36 @@ def _ensure_unique_names(specs: Iterable[EndpointSpec]) -> None:
         seen.add(spec.name)
 
 
-def resolve_fetch_params_path(path: str | Path | None = None) -> Path | None:
+def resolve_private_config_path(relative_path: str | Path, path: str | Path | None = None) -> Path:
     if path is not None:
         return Path(path)
 
-    env_path = os.environ.get(FETCH_PARAMS_ENV_VAR)
-    if env_path and env_path.strip():
-        return Path(env_path.strip())
+    relative = Path(relative_path)
+    if relative.is_absolute():
+        return relative
 
-    if LOCAL_FETCH_PARAMS_PATH.is_file():
-        return LOCAL_FETCH_PARAMS_PATH
+    config_dir = os.environ.get(CONFIG_DIR_ENV_VAR)
+    if config_dir and config_dir.strip():
+        return Path(config_dir.strip()) / relative
+
+    return LOCAL_CONFIG_DIR / relative
+
+
+def resolve_optional_private_config_path(
+    relative_path: str | Path,
+    path: str | Path | None = None,
+) -> Path | None:
+    if path is not None:
+        return Path(path)
+
+    resolved_path = resolve_private_config_path(relative_path)
+    if resolved_path.is_file():
+        return resolved_path
     return None
+
+
+def resolve_fetch_params_path(path: str | Path | None = None) -> Path | None:
+    return resolve_optional_private_config_path(FETCH_PARAMS_CONFIG_PATH, path)
 
 
 def _overlay_params(base: dict[str, Any], overlay: Any, *, field_name: str) -> dict[str, Any]:

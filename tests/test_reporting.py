@@ -7,7 +7,7 @@ from centric_mdm_validation.validation import DppReadinessValidator, DppRuleSet
 
 
 def test_reporter_writes_expected_files(tmp_path: Path) -> None:
-    rules = DppRuleSet.from_yaml(Path("config/rules/dpp-readiness.example.yml"))
+    rules = DppRuleSet.from_yaml(Path("tests/fixtures/dpp-readiness.yml"))
     records = read_json_records(Path("tests/fixtures/projected-products.json"))
     payloads = [CentricProductPayload.model_validate(record) for record in records]
     run = DppReadinessValidator(rules).validate_many(payloads)

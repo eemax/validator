@@ -4,6 +4,7 @@ from typing import Annotated
 import typer
 
 from centric_mdm_validation.centric.cli import main as fetcher_main
+from centric_mdm_validation.centric.config import resolve_private_config_path
 from centric_mdm_validation.centric.mapper import write_projected_products
 from centric_mdm_validation.io import read_json_records, write_json
 from centric_mdm_validation.models import CentricProductPayload
@@ -13,9 +14,17 @@ from centric_mdm_validation.validation import DppReadinessValidator, DppRuleSet
 app = typer.Typer(help="Centric MDM validation tools.")
 
 RulesOption = Annotated[
-    Path,
-    typer.Option("--rules", "-r", help="DPP readiness rule YAML."),
+    Path | None,
+    typer.Option(
+        "--rules",
+        "-r",
+        help=(
+            "DPP readiness rule YAML. Defaults to CENTRIC_CONFIG_DIR/rules/dpp-readiness.yml "
+            "or .local/rules/dpp-readiness.yml."
+        ),
+    ),
 ]
+RULES_CONFIG_PATH = Path("rules/dpp-readiness.yml")
 
 
 @app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
@@ -59,7 +68,7 @@ def validate(
         Path,
         typer.Option("--input", "-i", help="Projected product JSON/JSONL."),
     ],
-    rules: RulesOption = Path("config/rules/dpp-readiness.example.yml"),
+    rules: RulesOption = None,
     output: Annotated[
         Path,
         typer.Option("--output", "-o", help="Validation result JSON."),
@@ -81,7 +90,7 @@ def report(
         Path,
         typer.Option("--input", "-i", help="Projected product JSON/JSONL."),
     ],
-    rules: RulesOption = Path("config/rules/dpp-readiness.example.yml"),
+    rules: RulesOption = None,
     output_dir: Annotated[
         Path,
         typer.Option("--output-dir", "-o", help="Directory for report files."),
@@ -96,8 +105,9 @@ def report(
     )
 
 
-def _validate(input_path: Path, rules: Path):
+def _validate(input_path: Path, rules: Path | None):
     records = read_json_records(input_path)
     payloads = [CentricProductPayload.model_validate(record) for record in records]
-    rule_set = DppRuleSet.from_yaml(rules)
+    rule_path = resolve_private_config_path(RULES_CONFIG_PATH, rules)
+    rule_set = DppRuleSet.from_yaml(rule_path)
     return DppReadinessValidator(rule_set).validate_many(payloads)

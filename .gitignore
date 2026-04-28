@@ -18,6 +18,7 @@ build/
 .DS_Store
 .idea/
 .vscode/
+.cursor/
 *.swp
 *.swo
 
@@ -26,9 +27,6 @@ build/
 .env.*
 !.env.example
 .local/
-config/delta_fetcher.yaml
-config/local*.yml
-config/local*.yaml
 
 # Generated runtime artifacts
 data/checkpoints/*

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -9,6 +8,7 @@ from typing import Any
 
 import yaml
 
+from centric_mdm_validation.centric.config import resolve_optional_private_config_path
 from centric_mdm_validation.io import read_json_records, write_jsonl
 from centric_mdm_validation.models import CentricProductPayload, CentricVariant
 
@@ -18,8 +18,7 @@ ENDPOINT_FILES = {
     "seasons": "seasons.jsonl",
     "materials": "materials.jsonl",
 }
-FIELD_MAPPING_ENV_VAR = "CENTRIC_FIELD_MAPPING"
-LOCAL_FIELD_MAPPING_PATH = Path(".local/field-mapping.yml")
+FIELD_MAPPING_CONFIG_PATH = Path("field-mapping.yml")
 
 
 @dataclass(frozen=True)
@@ -48,13 +47,7 @@ def resolve_projection_mapping_path(path: Path | None = None) -> Path | None:
     if path is not None:
         return path
 
-    env_path = os.environ.get(FIELD_MAPPING_ENV_VAR)
-    if env_path and env_path.strip():
-        return Path(env_path.strip())
-
-    if LOCAL_FIELD_MAPPING_PATH.is_file():
-        return LOCAL_FIELD_MAPPING_PATH
-    return None
+    return resolve_optional_private_config_path(FIELD_MAPPING_CONFIG_PATH)
 
 
 def load_projection_mapping(path: Path | None = None) -> ProjectionMapping:

@@ -5,7 +5,6 @@ retry_max_seconds: 75
 jitter_ratio: 0.1
 output_dir: data/raw
 checkpoint_dir: data/checkpoints
-env_file: .env
 
 endpoints:
   - name: seasons

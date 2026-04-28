@@ -6,7 +6,7 @@ from centric_mdm_validation.validation import DppReadinessValidator, DppRuleSet
 
 
 def test_dpp_readiness_splits_ready_and_blocked_products() -> None:
-    rules = DppRuleSet.from_yaml(Path("config/rules/dpp-readiness.example.yml"))
+    rules = DppRuleSet.from_yaml(Path("tests/fixtures/dpp-readiness.yml"))
     records = read_json_records(Path("tests/fixtures/projected-products.json"))
     payloads = [CentricProductPayload.model_validate(record) for record in records]
 
@@ -28,7 +28,7 @@ def test_dpp_readiness_splits_ready_and_blocked_products() -> None:
 
 
 def test_warning_only_product_remains_ready() -> None:
-    rules = DppRuleSet.from_yaml(Path("config/rules/dpp-readiness.example.yml"))
+    rules = DppRuleSet.from_yaml(Path("tests/fixtures/dpp-readiness.yml"))
     records = read_json_records(Path("tests/fixtures/projected-products.json"))
     payloads = [CentricProductPayload.model_validate(record) for record in records]
 

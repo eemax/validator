@@ -69,7 +69,7 @@ def resolve_credentials(
     token = _env_value("CENTRIC_TOKEN", env_values)
 
     if not base_url:
-        raise AuthError("Missing CENTRIC_BASE_URL in environment or .env.")
+        raise AuthError("Missing CENTRIC_BASE_URL in environment or env file.")
     return _normalize_base_url(base_url), username, password, token
 
 

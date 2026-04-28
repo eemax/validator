@@ -28,7 +28,7 @@ uv sync --dev
 ```bash
 uv run centric-mdm validate \
   --input tests/fixtures/projected-products.json \
-  --rules config/rules/dpp-readiness.example.yml \
+  --rules .local/rules/dpp-readiness.yml \
   --output data/results/dpp-readiness-results.json
 ```
 
@@ -40,22 +40,20 @@ uv run centric-mdm project \
   --output data/results/projected-products.jsonl
 ```
 
-Company-specific Centric attribute names should live outside the public repo. The project looks
-for projection mappings in this order:
+Company-specific Centric attribute names live outside the public repo. Put private config under
+`CENTRIC_CONFIG_DIR`, or use `.local/` for repo-adjacent local work. `.local/` is gitignored.
+The project looks for projection mappings in this order:
 
 1. `--mapping /path/to/private/field-mapping.yml`
-2. `CENTRIC_FIELD_MAPPING=/path/to/private/field-mapping.yml`
+2. `CENTRIC_CONFIG_DIR/field-mapping.yml`
 3. `.local/field-mapping.yml`
-
-Use `config/field-mapping.example.yml` as the public template. `.local/` is gitignored for
-repo-adjacent private mappings.
 
 ## Create DPP Reports
 
 ```bash
 uv run centric-mdm report \
   --input tests/fixtures/projected-products.json \
-  --rules config/rules/dpp-readiness.example.yml \
+  --rules .local/rules/dpp-readiness.yml \
   --output-dir reports/dpp-readiness
 ```
 
@@ -69,7 +67,7 @@ Outputs:
 ## Fetch Centric Data
 
 Connection details are intentionally not stored in fetch config. Export them in your shell or
-place them in `.env`:
+place them in `CENTRIC_CONFIG_DIR/local.env` or `.local/local.env`:
 
 ```bash
 export CENTRIC_BASE_URL="https://centric.example.com"
@@ -83,24 +81,24 @@ not written to disk. `CENTRIC_TOKEN` can be provided as an initial in-memory tok
 Run the fetcher through either CLI:
 
 ```bash
-uv run centric-fetch run --config config/fetcher.example.yml --endpoint styles
-uv run centric-mdm fetch --config config/fetcher.example.yml --endpoint styles
+uv run centric-fetch run --config config/fetcher.yml --endpoint styles
+uv run centric-mdm fetch --config config/fetcher.yml --endpoint styles
 ```
 
-Installation-specific fetch filters should also live outside the public repo. The fetcher looks
-for private params in this order:
+Installation-specific fetch filters also live outside the public repo. The fetcher looks for
+private params in this order:
 
 1. `--params /path/to/private/fetch-params.yml`
-2. `CENTRIC_FETCH_PARAMS=/path/to/private/fetch-params.yml`
+2. `CENTRIC_CONFIG_DIR/fetch-params.yml`
 3. `.local/fetch-params.yml`
 
-Use `config/fetch-params.example.yml` as the public template.
+The only repo runtime config currently kept under `config/` is `config/fetcher.yml`.
 
 Useful modes inherited from the standalone fetcher:
 
 - `--resume` continues from endpoint checkpoints.
 - `--delta` uses `_modified_at` floors from the delta state file
-  (`config/delta_fetcher.yaml` by default; see `config/delta_fetcher.example.yml`).
+  (`CENTRIC_CONFIG_DIR/delta_fetcher.yml` or `.local/delta_fetcher.yml` by default).
 - `--delta-dry-run` shows injected delta filters without fetching data.
 - `--months 24` fetches records modified in the last 24 calendar months.
 - `--log-level summary|http|debug` enables structured fetch logs.

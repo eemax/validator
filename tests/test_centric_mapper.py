@@ -1,7 +1,7 @@
 from pathlib import Path
 
+from centric_mdm_validation.centric.config import CONFIG_DIR_ENV_VAR
 from centric_mdm_validation.centric.mapper import (
-    FIELD_MAPPING_ENV_VAR,
     ProjectionMapping,
     load_projection_mapping,
     project_products,
@@ -90,16 +90,19 @@ def test_project_products_does_not_invent_missing_global_ids() -> None:
     assert payload.product_type_code is None
 
 
-def test_projection_mapping_path_prefers_explicit_then_env(
+def test_projection_mapping_path_prefers_explicit_then_config_dir(
     tmp_path,
     monkeypatch,
 ) -> None:
     explicit = tmp_path / "explicit.yml"
-    env_path = tmp_path / "env.yml"
-    monkeypatch.setenv(FIELD_MAPPING_ENV_VAR, str(env_path))
+    config_dir = tmp_path / "centric-config"
+    mapping_path = config_dir / "field-mapping.yml"
+    config_dir.mkdir()
+    mapping_path.write_text("style: {}\n", encoding="utf-8")
+    monkeypatch.setenv(CONFIG_DIR_ENV_VAR, str(config_dir))
 
     assert resolve_projection_mapping_path(explicit) == explicit
-    assert resolve_projection_mapping_path() == env_path
+    assert resolve_projection_mapping_path() == mapping_path
 
 
 def test_load_projection_mapping_from_file(tmp_path: Path) -> None:

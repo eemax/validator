@@ -3,10 +3,11 @@ from pathlib import Path
 import pytest
 
 from centric_mdm_validation.centric.config import (
-    FETCH_PARAMS_ENV_VAR,
+    CONFIG_DIR_ENV_VAR,
     ConfigError,
     load_fetcher_settings,
     resolve_fetch_params_path,
+    resolve_private_config_path,
 )
 
 
@@ -48,7 +49,8 @@ endpoints:
         load_fetcher_settings(config)
 
 
-def test_load_fetcher_settings_keeps_endpoint_runtime_config(tmp_path: Path) -> None:
+def test_load_fetcher_settings_keeps_endpoint_runtime_config(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv(CONFIG_DIR_ENV_VAR, raising=False)
     config = _write_config(
         tmp_path / "fetcher.yml",
         """
@@ -59,7 +61,6 @@ retry_max_seconds: 2
 jitter_ratio: 0.1
 output_dir: data/raw
 checkpoint_dir: data/checkpoints
-env_file: config/local.env
 endpoints:
   - name: styles
     api_version: v2
@@ -83,11 +84,51 @@ endpoints:
     assert fetcher_cfg.timeout == 12
     assert fetcher_cfg.output_dir == Path("data/raw")
     assert fetcher_cfg.checkpoint_dir == Path("data/checkpoints")
-    assert auth_settings.env_file == Path("config/local.env")
+    assert auth_settings.env_file == Path(".local/local.env")
     assert len(endpoints) == 1
     assert endpoints[0].name == "styles"
     assert endpoints[0].item_path == "$.items"
     assert endpoints[0].count_spec is not None
+
+
+def test_default_env_file_comes_from_config_dir(tmp_path: Path, monkeypatch) -> None:
+    config_dir = tmp_path / "centric-config"
+    monkeypatch.setenv(CONFIG_DIR_ENV_VAR, str(config_dir))
+    config = _write_config(
+        tmp_path / "fetcher.yml",
+        """
+endpoints:
+  - name: styles
+    api_version: v2
+    path: styles
+""",
+    )
+
+    _, auth_settings, _ = load_fetcher_settings(config)
+
+    assert auth_settings.env_file == config_dir / "local.env"
+
+
+def test_simple_env_file_name_is_resolved_from_config_dir(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config_dir = tmp_path / "centric-config"
+    monkeypatch.setenv(CONFIG_DIR_ENV_VAR, str(config_dir))
+    config = _write_config(
+        tmp_path / "fetcher.yml",
+        """
+env_file: private.env
+endpoints:
+  - name: styles
+    api_version: v2
+    path: styles
+""",
+    )
+
+    _, auth_settings, _ = load_fetcher_settings(config)
+
+    assert auth_settings.env_file == config_dir / "private.env"
 
 
 def test_load_fetcher_settings_applies_private_params_overlay(tmp_path: Path) -> None:
@@ -130,10 +171,33 @@ endpoints:
     }
 
 
-def test_fetch_params_path_prefers_explicit_then_env(tmp_path: Path, monkeypatch) -> None:
+def test_private_config_path_prefers_explicit_then_config_dir(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     explicit = tmp_path / "explicit.yml"
-    env_path = tmp_path / "env.yml"
-    monkeypatch.setenv(FETCH_PARAMS_ENV_VAR, str(env_path))
+    config_dir = tmp_path / "centric-config"
+    monkeypatch.setenv(CONFIG_DIR_ENV_VAR, str(config_dir))
 
-    assert resolve_fetch_params_path(explicit) == explicit
-    assert resolve_fetch_params_path() == env_path
+    assert resolve_private_config_path("fetch-params.yml", explicit) == explicit
+    assert resolve_private_config_path("fetch-params.yml") == config_dir / "fetch-params.yml"
+
+
+def test_fetch_params_path_uses_config_dir_then_local_when_present(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / "centric-config"
+    config_dir.mkdir()
+    params = _write_config(config_dir / "fetch-params.yml", "endpoints: {}\n")
+    monkeypatch.setenv(CONFIG_DIR_ENV_VAR, str(config_dir))
+
+    assert resolve_fetch_params_path() == params
+
+    monkeypatch.delenv(CONFIG_DIR_ENV_VAR)
+    local_params = tmp_path / ".local" / "fetch-params.yml"
+    local_params.parent.mkdir()
+    _write_config(local_params, "endpoints: {}\n")
+
+    assert resolve_fetch_params_path() == Path(".local/fetch-params.yml")
