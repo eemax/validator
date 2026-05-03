@@ -92,6 +92,37 @@ def test_ingest_raw_dir_applies_delta_once_and_keeps_newest_record(tmp_path) -> 
     assert payloads[0].style_name == "Updated Jacket"
 
 
+def test_ingest_raw_dir_dedupes_records_within_file_by_modified_at(tmp_path) -> None:
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    _write_jsonl(
+        raw_dir / "styles.jsonl",
+        [
+            {
+                "id": "S1",
+                "_modified_at": "2026-04-30T09:00:00Z",
+                "active": True,
+                "node_name": "Newer Style",
+                "brand_code": "BR",
+            },
+            {
+                "id": "S1",
+                "_modified_at": "2026-04-29T09:00:00Z",
+                "active": True,
+                "node_name": "Older Style",
+                "brand_code": "BR",
+            },
+        ],
+    )
+    db_path = tmp_path / "centric.duckdb"
+
+    result = ingest_raw_dir(raw_dir, db_path, schemas=load_endpoint_schemas())
+    payloads = reconstruct_products(db_path)
+
+    assert result.records_upserted == 1
+    assert payloads[0].style_name == "Newer Style"
+
+
 def test_ingest_raw_dir_applies_active_false_as_delete(tmp_path) -> None:
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()

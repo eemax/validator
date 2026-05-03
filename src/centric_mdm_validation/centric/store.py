@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,7 +14,7 @@ import duckdb
 from centric_mdm_validation.centric.mapper import ProjectionMapping
 from centric_mdm_validation.centric.reconstruction import reconstruct_products_from_records
 from centric_mdm_validation.centric.schema import EndpointSchema
-from centric_mdm_validation.io import read_json_records, write_jsonl
+from centric_mdm_validation.io import write_jsonl
 from centric_mdm_validation.models import CentricProductPayload
 
 
@@ -38,11 +39,26 @@ class IngestResult:
     endpoints: dict[str, int]
 
 
+@dataclass(frozen=True)
+class IngestFileProgress:
+    action: str
+    raw_file: RawFile
+    file_index: int
+    total_files: int
+    records_read: int = 0
+    records_upserted: int = 0
+    records_deleted: int = 0
+
+
+IngestProgressCallback = Callable[[IngestFileProgress], None]
+
+
 def ingest_raw_dir(
     raw_dir: Path,
     db_path: Path,
     *,
     schemas: dict[str, EndpointSchema],
+    progress: IngestProgressCallback | None = None,
 ) -> IngestResult:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     raw_files = discover_raw_files(raw_dir)
@@ -55,11 +71,19 @@ def ingest_raw_dir(
 
     with duckdb.connect(str(db_path)) as conn:
         initialize_store(conn)
-        for raw_file in raw_files:
+        total_files = len(raw_files)
+        for file_index, raw_file in enumerate(raw_files, start=1):
             content_hash = _sha256(raw_file.path)
             applied_hash = _applied_hash(conn, raw_file.path)
             if applied_hash == content_hash:
                 skipped_files += 1
+                _emit_ingest_progress(
+                    progress,
+                    action="skipped",
+                    raw_file=raw_file,
+                    file_index=file_index,
+                    total_files=total_files,
+                )
                 continue
             if applied_hash is not None and applied_hash != content_hash:
                 raise ValueError(
@@ -68,55 +92,23 @@ def ingest_raw_dir(
                 )
 
             schema = schemas.get(raw_file.endpoint, EndpointSchema(name=raw_file.endpoint))
-            records = read_json_records(raw_file.path)
             ingested_at = _format_datetime(datetime.now(UTC))
+            _emit_ingest_progress(
+                progress,
+                action="start",
+                raw_file=raw_file,
+                file_index=file_index,
+                total_files=total_files,
+            )
 
             conn.execute("BEGIN TRANSACTION")
             try:
-                file_upserts = 0
-                file_deletes = 0
-                for record in records:
-                    if not isinstance(record, dict):
-                        continue
-                    record_id = _clean_text(record.get(schema.primary_key))
-                    if record_id is None:
-                        continue
-                    if _is_delete_record(record, schema):
-                        if _should_apply_record(conn, raw_file.endpoint, record_id, record, schema):
-                            conn.execute(
-                                "DELETE FROM endpoint_records WHERE endpoint = ? AND record_id = ?",
-                                [raw_file.endpoint, record_id],
-                            )
-                            file_deletes += 1
-                        continue
-                    if not _should_apply_record(conn, raw_file.endpoint, record_id, record, schema):
-                        continue
-
-                    modified_at = _format_optional_datetime(_record_modified_at(record, schema))
-                    payload = json.dumps(record, default=str, separators=(",", ":"))
-                    conn.execute(
-                        "DELETE FROM endpoint_records WHERE endpoint = ? AND record_id = ?",
-                        [raw_file.endpoint, record_id],
-                    )
-                    conn.execute(
-                        """
-                        INSERT INTO endpoint_records (
-                            endpoint, record_id, payload, modified_at, source_file,
-                            source_run_id, ingested_at
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        [
-                            raw_file.endpoint,
-                            record_id,
-                            payload,
-                            modified_at,
-                            str(raw_file.path),
-                            raw_file.source_run_id,
-                            ingested_at,
-                        ],
-                    )
-                    file_upserts += 1
+                file_record_count, file_upserts, file_deletes = _apply_records_for_file(
+                    conn,
+                    raw_file=raw_file,
+                    schema=schema,
+                    ingested_at=ingested_at,
+                )
 
                 conn.execute(
                     """
@@ -131,7 +123,7 @@ def ingest_raw_dir(
                         raw_file.endpoint,
                         raw_file.source_run_id,
                         raw_file.is_delta,
-                        len(records),
+                        file_record_count,
                         content_hash,
                         str(raw_file.manifest_path) if raw_file.manifest_path is not None else None,
                         raw_file.manifest_sha256,
@@ -145,10 +137,20 @@ def ingest_raw_dir(
                 raise
 
             applied_files += 1
-            records_read += len(records)
+            records_read += file_record_count
             records_upserted += file_upserts
             records_deleted += file_deletes
-            endpoints[raw_file.endpoint] += len(records)
+            endpoints[raw_file.endpoint] += file_record_count
+            _emit_ingest_progress(
+                progress,
+                action="applied",
+                raw_file=raw_file,
+                file_index=file_index,
+                total_files=total_files,
+                records_read=file_record_count,
+                records_upserted=file_upserts,
+                records_deleted=file_deletes,
+            )
 
     return IngestResult(
         applied_files=applied_files,
@@ -157,6 +159,32 @@ def ingest_raw_dir(
         records_upserted=records_upserted,
         records_deleted=records_deleted,
         endpoints=dict(sorted(endpoints.items())),
+    )
+
+
+def _emit_ingest_progress(
+    progress: IngestProgressCallback | None,
+    *,
+    action: str,
+    raw_file: RawFile,
+    file_index: int,
+    total_files: int,
+    records_read: int = 0,
+    records_upserted: int = 0,
+    records_deleted: int = 0,
+) -> None:
+    if progress is None:
+        return
+    progress(
+        IngestFileProgress(
+            action=action,
+            raw_file=raw_file,
+            file_index=file_index,
+            total_files=total_files,
+            records_read=records_read,
+            records_upserted=records_upserted,
+            records_deleted=records_deleted,
+        )
     )
 
 
@@ -279,6 +307,149 @@ def _applied_hash(conn: duckdb.DuckDBPyConnection, path: Path) -> str | None:
     return str(row[0])
 
 
+def _apply_records_for_file(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    raw_file: RawFile,
+    schema: EndpointSchema,
+    ingested_at: str,
+) -> tuple[int, int, int]:
+    conn.execute("DROP TABLE IF EXISTS ingest_stage")
+    modified_expr = _modified_at_sql_expr(schema)
+    delete_expr = _delete_sql_expr(schema)
+    conn.execute(
+        f"""
+        CREATE TEMP TABLE ingest_stage AS
+        WITH lines AS (
+            SELECT
+                row_number() OVER () - 1 AS row_order,
+                trim(line) AS payload
+            FROM (
+                SELECT unnest(string_split(content, '\n')) AS line
+                FROM read_text(?)
+            )
+            WHERE trim(line) <> ''
+        ),
+        extracted AS (
+            SELECT
+                CAST(row_order AS INTEGER) AS row_order,
+                ? AS endpoint,
+                json_extract_string(payload, ?) AS record_id,
+                payload,
+                {modified_expr} AS modified_at,
+                ? AS source_file,
+                ? AS source_run_id,
+                ? AS ingested_at,
+                coalesce({delete_expr}, false) AS is_delete
+            FROM lines
+        )
+        SELECT *
+        FROM extracted
+        WHERE record_id IS NOT NULL AND trim(record_id) <> ''
+        """,
+        [
+            str(raw_file.path),
+            raw_file.endpoint,
+            _json_path(schema.primary_key),
+            str(raw_file.path),
+            raw_file.source_run_id,
+            ingested_at,
+        ],
+    )
+
+    file_record_count = conn.execute("SELECT COUNT(*) FROM ingest_stage").fetchone()[0]
+
+    conn.execute(
+        """
+        CREATE OR REPLACE TEMP TABLE ingest_stage_winners AS
+        SELECT
+            endpoint,
+            record_id,
+            payload,
+            modified_at,
+            source_file,
+            source_run_id,
+            ingested_at,
+            is_delete
+        FROM ingest_stage
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY endpoint, record_id
+            ORDER BY
+                modified_at IS NOT NULL DESC,
+                modified_at DESC NULLS LAST,
+                row_order DESC
+        ) = 1
+        """
+    )
+    conn.execute(
+        """
+        CREATE OR REPLACE TEMP TABLE ingest_applicable AS
+        SELECT winners.*
+        FROM ingest_stage_winners winners
+        LEFT JOIN endpoint_records existing
+          ON existing.endpoint = winners.endpoint
+         AND existing.record_id = winners.record_id
+        WHERE existing.record_id IS NULL
+           OR winners.modified_at IS NULL
+           OR existing.modified_at IS NULL
+           OR winners.modified_at >= existing.modified_at
+        """
+    )
+
+    file_deletes = conn.execute(
+        "SELECT COUNT(*) FROM ingest_applicable WHERE is_delete"
+    ).fetchone()[0]
+    file_upserts = conn.execute(
+        "SELECT COUNT(*) FROM ingest_applicable WHERE NOT is_delete"
+    ).fetchone()[0]
+
+    conn.execute(
+        """
+        DELETE FROM endpoint_records
+        USING ingest_applicable
+        WHERE endpoint_records.endpoint = ingest_applicable.endpoint
+          AND endpoint_records.record_id = ingest_applicable.record_id
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO endpoint_records (
+            endpoint, record_id, payload, modified_at, source_file, source_run_id, ingested_at
+        )
+        SELECT
+            endpoint, record_id, payload, modified_at, source_file, source_run_id, ingested_at
+        FROM ingest_applicable
+        WHERE NOT is_delete
+        """
+    )
+    return int(file_record_count), int(file_upserts), int(file_deletes)
+
+
+def _modified_at_sql_expr(schema: EndpointSchema) -> str:
+    fields = [_json_path(field) for field in schema.modified_at_fields]
+    if not fields:
+        return "NULL"
+    extracts = ", ".join(f"json_extract_string(payload, '{field}')" for field in fields)
+    return f"coalesce({extracts})"
+
+
+def _delete_sql_expr(schema: EndpointSchema) -> str:
+    if schema.delete_field is None:
+        return "false"
+    delete_value = _delete_when_text(schema.delete_when)
+    return f"json_extract_string(payload, '{_json_path(schema.delete_field)}') = '{delete_value}'"
+
+
+def _delete_when_text(value: Any) -> str:
+    if isinstance(value, bool):
+        return str(value).lower()
+    return str(value)
+
+
+def _json_path(field: str) -> str:
+    return '$."' + field.replace('"', '\\"') + '"'
+
+
 def _ensure_column(
     conn: duckdb.DuckDBPyConnection,
     table_name: str,
@@ -291,70 +462,8 @@ def _ensure_column(
         conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
 
 
-def _should_apply_record(
-    conn: duckdb.DuckDBPyConnection,
-    endpoint: str,
-    record_id: str,
-    record: dict[str, Any],
-    schema: EndpointSchema,
-) -> bool:
-    row = conn.execute(
-        """
-        SELECT modified_at, ingested_at
-        FROM endpoint_records
-        WHERE endpoint = ? AND record_id = ?
-        """,
-        [endpoint, record_id],
-    ).fetchone()
-    if row is None:
-        return True
-
-    incoming_modified_at = _record_modified_at(record, schema)
-    existing_modified_at = _parse_datetime(row[0])
-    if incoming_modified_at is None or existing_modified_at is None:
-        return True
-    return incoming_modified_at >= existing_modified_at
-
-
-def _record_modified_at(record: dict[str, Any], schema: EndpointSchema) -> datetime | None:
-    for field in schema.modified_at_fields:
-        parsed = _parse_datetime(record.get(field))
-        if parsed is not None:
-            return parsed
-    return None
-
-
-def _is_delete_record(record: dict[str, Any], schema: EndpointSchema) -> bool:
-    if schema.delete_field is None:
-        return False
-    if schema.delete_field not in record:
-        return False
-    return record.get(schema.delete_field) == schema.delete_when
-
-
-def _parse_datetime(value: Any) -> datetime | None:
-    if not isinstance(value, str) or not value.strip():
-        return None
-    text = value.strip()
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
-
-
 def _format_datetime(value: datetime) -> str:
     return value.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-
-
-def _format_optional_datetime(value: datetime | None) -> str | None:
-    if value is None:
-        return None
-    return _format_datetime(value)
 
 
 def _endpoint_from_filename(filename: str) -> tuple[str | None, bool]:

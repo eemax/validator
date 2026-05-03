@@ -7,7 +7,12 @@ from centric_mdm_validation.centric.cli import main as fetcher_main
 from centric_mdm_validation.centric.config import resolve_private_config_path
 from centric_mdm_validation.centric.mapper import load_projection_mapping, write_projected_products
 from centric_mdm_validation.centric.schema import load_endpoint_schemas
-from centric_mdm_validation.centric.store import ingest_raw_dir, write_reconstructed_products
+from centric_mdm_validation.centric.store import (
+    IngestFileProgress,
+    discover_raw_files,
+    ingest_raw_dir,
+    write_reconstructed_products,
+)
 from centric_mdm_validation.io import read_json_records, write_json
 from centric_mdm_validation.models import CentricProductPayload
 from centric_mdm_validation.reporting import DppReadinessReporter
@@ -62,8 +67,10 @@ def project(
 ) -> None:
     """Project fetched Centric endpoint payloads into validator product payloads."""
 
+    _echo_step(f"Project: reading endpoint payloads from {input_dir}")
+    _echo_step(f"Project: writing validator payloads to {output}")
     payloads = write_projected_products(input_dir, output, mapping)
-    typer.echo(f"Projected {len(payloads)} products from {input_dir} into {output}")
+    _echo_done(f"Projected {len(payloads)} products from {input_dir} into {output}")
 
 
 @app.command()
@@ -83,8 +90,8 @@ def ingest(
 ) -> None:
     """Catch up the DuckDB reconstruction store from immutable raw endpoint files."""
 
-    result = ingest_raw_dir(raw_dir, db, schemas=load_endpoint_schemas(schema))
-    typer.echo(
+    result = _run_ingest(raw_dir=raw_dir, db=db, schema=schema)
+    _echo_done(
         f"Ingested {result.applied_files} raw files into {db} "
         f"({result.skipped_files} already applied, {result.records_upserted} upserts, "
         f"{result.records_deleted} deletes)."
@@ -108,8 +115,10 @@ def reconstruct(
 ) -> None:
     """Project current reconstructed store state into validator product payloads."""
 
+    _echo_step(f"Reconstruct: reading current endpoint state from {db}")
+    _echo_step(f"Reconstruct: writing validator payloads to {output}")
     payloads = write_reconstructed_products(db, output, mapping=load_projection_mapping(mapping))
-    typer.echo(f"Reconstructed {len(payloads)} products from {db} into {output}")
+    _echo_done(f"Reconstructed {len(payloads)} products from {db} into {output}")
 
 
 @app.command()
@@ -146,18 +155,24 @@ def pipeline(
 ) -> None:
     """Ingest raw files, reconstruct products, validate them, and optionally write reports."""
 
-    ingest_result = ingest_raw_dir(raw_dir, db, schemas=load_endpoint_schemas(schema))
+    _echo_step("Pipeline: starting ingest")
+    ingest_result = _run_ingest(raw_dir=raw_dir, db=db, schema=schema)
+    _echo_step("Pipeline: reconstructing product payloads")
     payloads = write_reconstructed_products(
         db,
         projected_output,
         mapping=load_projection_mapping(mapping),
     )
+    _echo_done(f"Reconstructed {len(payloads)} products into {projected_output}")
+    _echo_step(f"Pipeline: validating {len(payloads)} products")
     run = _validate_payloads(payloads, rules)
+    _echo_step(f"Pipeline: writing validation results to {validation_output}")
     write_json(validation_output, run.model_dump(mode="json"))
     if report_output_dir is not None:
+        _echo_step(f"Pipeline: writing reports to {report_output_dir}")
         DppReadinessReporter().write_all(run, report_output_dir)
 
-    typer.echo(
+    _echo_done(
         f"Pipeline complete: {ingest_result.applied_files} raw files applied "
         f"({ingest_result.skipped_files} skipped), {len(payloads)} products reconstructed, "
         f"{run.ready_products}/{run.total_products} ready. Results: {validation_output}"
@@ -178,9 +193,11 @@ def validate(
 ) -> None:
     """Validate projected Centric products for DPP readiness."""
 
+    _echo_step(f"Validate: reading projected products from {input_path}")
     run = _validate(input_path, rules)
+    _echo_step(f"Validate: writing results to {output}")
     write_json(output, run.model_dump(mode="json"))
-    typer.echo(
+    _echo_done(
         f"Validated {run.total_products} products: {run.ready_products} ready "
         f"({run.readiness_percent}%). Results: {output}"
     )
@@ -200,11 +217,58 @@ def report(
 ) -> None:
     """Create DPP readiness reports."""
 
+    _echo_step(f"Report: reading projected products from {input_path}")
     run = _validate(input_path, rules)
+    _echo_step(f"Report: writing report files to {output_dir}")
     DppReadinessReporter().write_all(run, output_dir)
-    typer.echo(
+    _echo_done(
         f"Wrote DPP readiness reports for {run.total_products} products into {output_dir}"
     )
+
+
+def _run_ingest(raw_dir: Path, db: Path, schema: Path | None):
+    raw_files = discover_raw_files(raw_dir)
+    _echo_step(f"Ingest: discovered {len(raw_files)} raw JSONL files under {raw_dir}")
+    _echo_step(f"Ingest: updating DuckDB store at {db}")
+    result = ingest_raw_dir(
+        raw_dir,
+        db,
+        schemas=load_endpoint_schemas(schema),
+        progress=_echo_ingest_progress,
+    )
+    if result.endpoints:
+        endpoint_counts = ", ".join(
+            f"{endpoint}={count}" for endpoint, count in result.endpoints.items()
+        )
+        _echo_step(f"Ingest: records read by endpoint: {endpoint_counts}")
+    return result
+
+
+def _echo_ingest_progress(event: IngestFileProgress) -> None:
+    prefix = f"Ingest: [{event.file_index}/{event.total_files}]"
+    path = event.raw_file.path
+    run = f", run={event.raw_file.source_run_id}" if event.raw_file.source_run_id else ""
+    suffix = " delta" if event.raw_file.is_delta else ""
+    if event.action == "start":
+        typer.echo(f"{prefix} applying {event.raw_file.endpoint}{suffix} from {path}{run}")
+        return
+    if event.action == "skipped":
+        typer.echo(f"{prefix} skipped already-applied {event.raw_file.endpoint} from {path}{run}")
+        return
+    if event.action == "applied":
+        typer.echo(
+            f"{prefix} applied {event.raw_file.endpoint}: "
+            f"{event.records_read} records, {event.records_upserted} upserts, "
+            f"{event.records_deleted} deletes"
+        )
+
+
+def _echo_step(message: str) -> None:
+    typer.echo(f"-> {message}")
+
+
+def _echo_done(message: str) -> None:
+    typer.echo(f"OK {message}")
 
 
 def _validate(input_path: Path, rules: Path | None):
