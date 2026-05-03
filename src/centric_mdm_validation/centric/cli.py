@@ -599,6 +599,116 @@ def _build_delta_run_summary_record(
     }
 
 
+def _build_endpoint_manifest_record(
+    *,
+    result: FetchRunResult,
+    status: str,
+    mode: str,
+    run_output_dir: Path,
+    delta_floor: str | None = None,
+    modified_since: str | None = None,
+    attempt_start: str | None = None,
+    attempt_end: str | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    output_file = result.output_file
+    try:
+        file_name = str(output_file.relative_to(run_output_dir))
+    except ValueError:
+        file_name = output_file.name
+    return {
+        "endpoint": result.endpoint,
+        "file": file_name,
+        "mode": mode,
+        "status": status,
+        "is_delta": mode == "delta",
+        "delta_floor": result.effective_delta_floor or delta_floor,
+        "modified_since": modified_since,
+        "attempt_start": attempt_start,
+        "attempt_end": attempt_end,
+        "items_fetched": result.items_fetched,
+        "pages_fetched": result.pages_fetched,
+        "expected_count": result.expected_count,
+        "retries_used": result.retries_used,
+        "count_validation": {
+            "status": result.count_validation_status,
+            "reason": result.count_validation_reason,
+        },
+        "id_validation": {
+            "status": result.id_validation_status,
+            "checked_items": result.id_validation_checked_items,
+            "unique_ids": result.id_validation_unique_ids,
+            "reason": result.id_validation_reason,
+        },
+        "already_completed": result.already_completed,
+        "did_catch_up": result.did_catch_up,
+        "warnings": result.warnings,
+        "error": error,
+    }
+
+
+def _write_run_manifest(
+    *,
+    output_dir: Path,
+    run_id: str,
+    mode: str,
+    run_started_at: datetime,
+    run_finished_at: datetime,
+    selected_specs: list[EndpointSpec],
+    results: list[FetchRunResult],
+    failures: list[tuple[str, str]],
+    endpoint_records: list[dict[str, Any]],
+    modified_since: str | None,
+) -> Path:
+    endpoint_record_by_name = {
+        str(record.get("endpoint")): record
+        for record in endpoint_records
+        if isinstance(record.get("endpoint"), str)
+    }
+    endpoints: dict[str, Any] = {}
+    for result in results:
+        record = endpoint_record_by_name.get(result.endpoint, {})
+        endpoints[result.endpoint] = _build_endpoint_manifest_record(
+            result=result,
+            status=str(record.get("status", "OK")),
+            mode=mode,
+            run_output_dir=output_dir,
+            delta_floor=record.get("delta_floor") if isinstance(record, dict) else None,
+            modified_since=modified_since,
+            attempt_start=record.get("attempt_start") if isinstance(record, dict) else None,
+            attempt_end=record.get("attempt_end") if isinstance(record, dict) else None,
+            error=record.get("error") if isinstance(record, dict) else None,
+        )
+
+    run_status = "OK"
+    if failures:
+        run_status = "FAILED" if len(failures) == len(selected_specs) else "PARTIAL"
+
+    manifest = {
+        "run_id": run_id,
+        "mode": mode,
+        "status": run_status,
+        "started_at": _utc_iso(run_started_at),
+        "finished_at": _utc_iso(run_finished_at),
+        "duration_seconds": round((run_finished_at - run_started_at).total_seconds(), 3),
+        "output_dir": str(output_dir),
+        "selected_endpoints": [spec.name for spec in selected_specs],
+        "endpoints_total": len(selected_specs),
+        "endpoints_succeeded": len(results),
+        "endpoints_failed": len(failures),
+        "total_items": sum(result.items_fetched for result in results),
+        "modified_since": modified_since,
+        "failures": [{"endpoint": endpoint, "error": message} for endpoint, message in failures],
+        "endpoints": endpoints,
+    }
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = output_dir / "manifest.json"
+    temp_path = output_dir / ".manifest.json.tmp"
+    temp_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    temp_path.replace(manifest_path)
+    return manifest_path
+
+
 def _build_delta_endpoint_log_record(
     *,
     endpoint_name: str,
@@ -837,19 +947,37 @@ def _finalize_run(
     delta_state: dict[str, Any] | None,
     delta_log_file: Path,
     delta_endpoint_records: list[dict[str, Any]],
+    run_output_dir: Path | None,
+    run_id: str | None,
+    non_delta_modified_since: str | None,
     log_callback: LogCallback | None,
 ) -> int:
+    run_finished_dt = _utc_now()
     if args.delta and delta_state is not None and not args.delta_dry_run:
         _append_delta_log(
             delta_log_file,
             _build_delta_run_summary_record(
                 run_started_at=run_started_dt,
-                run_finished_at=_utc_now(),
+                run_finished_at=run_finished_dt,
                 selected_specs=selected_specs,
                 results=results,
                 failures=failures,
                 endpoint_records=delta_endpoint_records,
             ),
+        )
+
+    if run_output_dir is not None and run_id is not None:
+        _write_run_manifest(
+            output_dir=run_output_dir,
+            run_id=run_id,
+            mode="delta" if args.delta else "months",
+            run_started_at=run_started_dt,
+            run_finished_at=run_finished_dt,
+            selected_specs=selected_specs,
+            results=results,
+            failures=failures,
+            endpoint_records=delta_endpoint_records,
+            modified_since=non_delta_modified_since,
         )
 
     for result in results:
@@ -934,12 +1062,14 @@ def _run(args: argparse.Namespace) -> int:
     if args.checkpoint_dir:
         fetcher_cfg.checkpoint_dir = Path(args.checkpoint_dir)
     if args.delta and not args.delta_dry_run:
-        fetcher_cfg.output_dir = fetcher_cfg.output_dir / "runs" / _delta_run_id(run_started_dt)
+        run_id = _delta_run_id(run_started_dt)
+        fetcher_cfg.output_dir = fetcher_cfg.output_dir / "runs" / run_id
     elif args.months is not None:
-        fetcher_cfg.output_dir = fetcher_cfg.output_dir / "runs" / _window_run_id(
-            run_started_dt,
-            args.months,
-        )
+        run_id = _window_run_id(run_started_dt, args.months)
+        fetcher_cfg.output_dir = fetcher_cfg.output_dir / "runs" / run_id
+    else:
+        run_id = None
+    run_output_dir = fetcher_cfg.output_dir if run_id is not None else None
 
     selected_specs = _select_endpoints(endpoint_specs, args.endpoint)
 
@@ -1137,6 +1267,34 @@ def _run(args: argparse.Namespace) -> int:
                             update_delta_state=should_update_delta_state,
                             result=result,
                         )
+                    elif args.months is not None:
+                        attempt_end_dt = _utc_now()
+                        delta_endpoint_records.append(
+                            {
+                                "endpoint": spec.name,
+                                "status": "OK",
+                                "attempt_start": attempt_start,
+                                "attempt_end": _utc_iso(attempt_end_dt),
+                                "duration_seconds": round(
+                                    (attempt_end_dt - attempt_start_dt).total_seconds(),
+                                    3,
+                                ),
+                                "items_fetched": result.items_fetched,
+                                "pages_fetched": result.pages_fetched,
+                                "retries_used": result.retries_used,
+                                "count_validation": {
+                                    "status": result.count_validation_status,
+                                    "reason": result.count_validation_reason,
+                                },
+                                "id_validation_status": result.id_validation_status,
+                                "id_validation_checked_items": result.id_validation_checked_items,
+                                "id_validation_unique_ids": result.id_validation_unique_ids,
+                                "id_validation_reason": result.id_validation_reason,
+                                "error": None,
+                                "output_file": str(result.output_file),
+                                "checkpoint_file": str(result.checkpoint_file),
+                            }
+                        )
                 except (FetchError, AuthError) as exc:
                     _record_endpoint_failure(
                         endpoint_name=spec.name,
@@ -1152,6 +1310,16 @@ def _run(args: argparse.Namespace) -> int:
                         delta_log_file=delta_log_file,
                         delta_endpoint_records=delta_endpoint_records,
                     )
+                    if not args.delta:
+                        delta_endpoint_records.append(
+                            {
+                                "endpoint": spec.name,
+                                "status": "FAILED",
+                                "attempt_start": attempt_start,
+                                "attempt_end": _utc_iso(_utc_now()),
+                                "error": str(exc),
+                            }
+                        )
                 except KeyboardInterrupt:
                     run_interrupted = True
                     _record_endpoint_failure(
@@ -1168,6 +1336,16 @@ def _run(args: argparse.Namespace) -> int:
                         delta_log_file=delta_log_file,
                         delta_endpoint_records=delta_endpoint_records,
                     )
+                    if not args.delta:
+                        delta_endpoint_records.append(
+                            {
+                                "endpoint": spec.name,
+                                "status": "FAILED",
+                                "attempt_start": attempt_start,
+                                "attempt_end": _utc_iso(_utc_now()),
+                                "error": _RUN_INTERRUPTED_MESSAGE,
+                            }
+                        )
                     break
 
         return _finalize_run(
@@ -1181,6 +1359,9 @@ def _run(args: argparse.Namespace) -> int:
             delta_state=delta_state,
             delta_log_file=delta_log_file,
             delta_endpoint_records=delta_endpoint_records,
+            run_output_dir=run_output_dir,
+            run_id=run_id,
+            non_delta_modified_since=non_delta_modified_since,
             log_callback=log_callback,
         )
     finally:

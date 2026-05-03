@@ -1,3 +1,4 @@
+import json
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -56,3 +57,9 @@ def test_months_fetch_writes_to_run_directory(tmp_path, monkeypatch) -> None:
     output_dir = captured_output_dirs[0]
     assert output_dir.parent == tmp_path / "raw" / "runs"
     assert output_dir.name.endswith("-months2")
+    manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["run_id"] == output_dir.name
+    assert manifest["mode"] == "months"
+    assert manifest["modified_since"] is not None
+    assert manifest["endpoints"]["styles"]["file"] == "styles.jsonl"
+    assert manifest["endpoints"]["styles"]["is_delta"] is False

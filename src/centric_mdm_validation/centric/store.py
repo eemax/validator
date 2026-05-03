@@ -22,6 +22,9 @@ class RawFile:
     endpoint: str
     is_delta: bool
     source_run_id: str
+    run_mode: str | None = None
+    manifest_path: Path | None = None
+    manifest_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -118,9 +121,9 @@ def ingest_raw_dir(
                     """
                     INSERT INTO applied_raw_files (
                         file_path, endpoint, source_run_id, is_delta, record_count,
-                        content_sha256, ingested_at
+                        content_sha256, manifest_path, manifest_sha256, run_mode, ingested_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         str(raw_file.path),
@@ -129,6 +132,9 @@ def ingest_raw_dir(
                         raw_file.is_delta,
                         len(records),
                         content_hash,
+                        str(raw_file.manifest_path) if raw_file.manifest_path is not None else None,
+                        raw_file.manifest_sha256,
+                        raw_file.run_mode,
                         ingested_at,
                     ],
                 )
@@ -204,13 +210,23 @@ def discover_raw_files(raw_dir: Path) -> list[RawFile]:
         endpoint, is_delta = _endpoint_from_filename(path.name)
         if endpoint is None:
             continue
-        source_run_id = path.parent.name if path.parent != raw_dir else "root"
+        manifest = _load_manifest(path.parent)
+        source_run_id = _manifest_run_id(manifest) or (
+            path.parent.name if path.parent != raw_dir else "root"
+        )
+        run_mode = _manifest_mode(manifest)
+        manifest_path = path.parent / "manifest.json" if manifest is not None else None
+        manifest_sha256 = _sha256(manifest_path) if manifest_path is not None else None
+        is_delta = _manifest_file_is_delta(manifest, path.name, default=is_delta)
         files.append(
             RawFile(
                 path=path,
                 endpoint=endpoint,
                 is_delta=is_delta,
                 source_run_id=source_run_id,
+                run_mode=run_mode,
+                manifest_path=manifest_path,
+                manifest_sha256=manifest_sha256,
             )
         )
     return sorted(files, key=lambda item: (_run_sort_key(item), item.endpoint, str(item.path)))
@@ -226,10 +242,16 @@ def initialize_store(conn: duckdb.DuckDBPyConnection) -> None:
             is_delta BOOLEAN NOT NULL,
             record_count INTEGER NOT NULL,
             content_sha256 VARCHAR NOT NULL,
+            manifest_path VARCHAR,
+            manifest_sha256 VARCHAR,
+            run_mode VARCHAR,
             ingested_at VARCHAR NOT NULL
         )
         """
     )
+    _ensure_column(conn, "applied_raw_files", "manifest_path", "VARCHAR")
+    _ensure_column(conn, "applied_raw_files", "manifest_sha256", "VARCHAR")
+    _ensure_column(conn, "applied_raw_files", "run_mode", "VARCHAR")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS endpoint_records (
@@ -254,6 +276,18 @@ def _applied_hash(conn: duckdb.DuckDBPyConnection, path: Path) -> str | None:
     if row is None:
         return None
     return str(row[0])
+
+
+def _ensure_column(
+    conn: duckdb.DuckDBPyConnection,
+    table_name: str,
+    column_name: str,
+    column_type: str,
+) -> None:
+    rows = conn.execute(f"PRAGMA table_info('{table_name}')").fetchall()
+    existing_columns = {str(row[1]) for row in rows}
+    if column_name not in existing_columns:
+        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
 
 
 def _should_apply_record(
@@ -331,6 +365,48 @@ def _endpoint_from_filename(filename: str) -> tuple[str | None, bool]:
     if not endpoint:
         return None, False
     return endpoint, is_delta
+
+
+def _load_manifest(run_dir: Path) -> dict[str, Any] | None:
+    manifest_path = run_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return None
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    return payload if isinstance(payload, dict) else None
+
+
+def _manifest_run_id(manifest: dict[str, Any] | None) -> str | None:
+    if manifest is None:
+        return None
+    run_id = manifest.get("run_id")
+    return _clean_text(run_id)
+
+
+def _manifest_mode(manifest: dict[str, Any] | None) -> str | None:
+    if manifest is None:
+        return None
+    return _clean_text(manifest.get("mode"))
+
+
+def _manifest_file_is_delta(
+    manifest: dict[str, Any] | None,
+    filename: str,
+    *,
+    default: bool,
+) -> bool:
+    if manifest is None:
+        return default
+    endpoints = manifest.get("endpoints")
+    if not isinstance(endpoints, dict):
+        return default
+    for endpoint in endpoints.values():
+        if not isinstance(endpoint, dict) or endpoint.get("file") != filename:
+            continue
+        is_delta = endpoint.get("is_delta")
+        if isinstance(is_delta, bool):
+            return is_delta
+    mode = _manifest_mode(manifest)
+    return mode == "delta" if mode is not None else default
 
 
 def _run_sort_key(raw_file: RawFile) -> str:

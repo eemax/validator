@@ -61,6 +61,7 @@ Delta fetches are written under immutable run directories:
 ```text
 data/raw/runs/2026-04-30T090000Z/styles.delta.jsonl
 data/raw/runs/2026-04-30T090000Z/bomrows.delta.jsonl
+data/raw/runs/2026-04-30T090000Z/manifest.json
 ```
 
 Catch the local DuckDB store up to all unapplied raw files:
@@ -167,6 +168,8 @@ Useful modes inherited from the standalone fetcher:
 - `--delta-dry-run` shows injected delta filters without fetching data.
 - `--months 24` fetches records modified in the last 24 calendar months and writes
   `data/raw/runs/<run-id>-months24/<endpoint>.jsonl`.
+- Delta and month-window run folders include `manifest.json` with run mode, selected endpoints,
+  per-endpoint output files, counts, status, and filter metadata.
 - `--log-level summary|http|debug` enables structured fetch logs.
 
 ## Project Boundary

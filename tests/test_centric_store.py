@@ -135,6 +135,47 @@ def test_load_current_endpoint_records_returns_endpoint_groups(tmp_path) -> None
     assert records == {"materials": [{"id": "M1", "node_name": "Cotton"}]}
 
 
+def test_ingest_raw_dir_records_manifest_metadata(tmp_path) -> None:
+    raw_dir = tmp_path / "raw"
+    run_dir = raw_dir / "runs" / "2026-05-03T102233Z-months2"
+    run_dir.mkdir(parents=True)
+    _write_jsonl(run_dir / "styles.jsonl", [{"id": "S1", "node_name": "Window Style"}])
+    (run_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "run_id": "2026-05-03T102233Z-months2",
+                "mode": "months",
+                "endpoints": {
+                    "styles": {
+                        "file": "styles.jsonl",
+                        "is_delta": False,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "centric.duckdb"
+
+    ingest_raw_dir(raw_dir, db_path, schemas=load_endpoint_schemas())
+
+    with duckdb.connect(str(db_path)) as conn:
+        row = conn.execute(
+            """
+            SELECT source_run_id, is_delta, run_mode, manifest_path, manifest_sha256
+            FROM applied_raw_files
+            WHERE endpoint = 'styles'
+            """
+        ).fetchone()
+
+    assert row[0] == "2026-05-03T102233Z-months2"
+    assert row[1] is False
+    assert row[2] == "months"
+    assert row[3].endswith("manifest.json")
+    assert isinstance(row[4], str)
+    assert len(row[4]) == 64
+
+
 def _write_jsonl(path, records: list[dict]) -> None:
     path.write_text(
         "".join(json.dumps(record, separators=(",", ":")) + "\n" for record in records),
