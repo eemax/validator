@@ -46,6 +46,7 @@ class _CheckpointState:
     completed: bool | None = None
     restart_from_zero: bool = False
     window_start_line: int | None = None
+    output_file: Path | None = None
     invalid_reason: str | None = None
 
 
@@ -403,6 +404,7 @@ def _read_checkpoint(path: Path) -> _CheckpointState:
     completed = payload.get("completed")
     restart_from_zero = payload.get("restart_from_zero", False)
     window_start_line = payload.get("window_start_line")
+    output_file = payload.get("output_file")
 
     if not isinstance(next_skip, int) or next_skip < 0:
         return _CheckpointState(
@@ -459,6 +461,16 @@ def _read_checkpoint(path: Path) -> _CheckpointState:
             invalid_reason="window_start_line must be a non-negative integer when present",
         )
 
+    normalized_output_file: Path | None = None
+    if output_file is not None:
+        if not isinstance(output_file, str) or not output_file.strip():
+            return _CheckpointState(
+                exists=True,
+                valid=False,
+                invalid_reason="output_file must be a non-empty string when present",
+            )
+        normalized_output_file = Path(output_file.strip())
+
     return _CheckpointState(
         exists=True,
         valid=True,
@@ -468,6 +480,7 @@ def _read_checkpoint(path: Path) -> _CheckpointState:
         completed=normalized_completed,
         restart_from_zero=restart_from_zero,
         window_start_line=normalized_window_start_line,
+        output_file=normalized_output_file,
     )
 
 
@@ -481,6 +494,7 @@ def _write_checkpoint(
     completed: bool = False,
     restart_from_zero: bool = False,
     window_start_line: int | None = None,
+    output_file: Path | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -495,6 +509,8 @@ def _write_checkpoint(
         payload["delta_floor"] = delta_floor
     if window_start_line is not None:
         payload["window_start_line"] = window_start_line
+    if output_file is not None:
+        payload["output_file"] = str(output_file)
     temp_path = path.parent / f".{path.name}.tmp"
     temp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     temp_path.replace(path)
@@ -724,6 +740,7 @@ def run_endpoint(
     fetcher_cfg: FetcherConfig,
     resume: bool = False,
     append_output: bool = False,
+    output_file_suffix: str = "",
     delta_floor: str | None = None,
     progress_callback: Callable[[FetchProgressEvent], None] | None = None,
     api_log_callback: ApiLogCallback = None,
@@ -734,7 +751,7 @@ def run_endpoint(
     warnings: list[str] = []
 
     safe_name = _safe_name(spec.name)
-    output_path = fetcher_cfg.output_dir / f"{safe_name}.jsonl"
+    output_path = fetcher_cfg.output_dir / f"{safe_name}{output_file_suffix}.jsonl"
     checkpoint_path = fetcher_cfg.checkpoint_dir / f"{safe_name}.json"
 
     checkpoint_state = _read_checkpoint(checkpoint_path)
@@ -765,6 +782,9 @@ def run_endpoint(
     checkpoint_window_start_line = (
         checkpoint_state.window_start_line if checkpoint_state.valid else None
     )
+    checkpoint_output_file = checkpoint_state.output_file if checkpoint_state.valid else None
+    if resume and checkpoint_output_file is not None and checkpoint_completed is not True:
+        output_path = checkpoint_output_file
     effective_delta_floor = delta_floor
     start_skip = checkpoint_skip if resume else 0
     items_fetched = checkpoint_count if (resume and checkpoint_skip > 0) else 0
@@ -953,6 +973,7 @@ def run_endpoint(
             completed=False,
             restart_from_zero=False,
             window_start_line=window_start_line,
+            output_file=output_path,
         )
         _emit_api_log(
             api_log_callback,
@@ -1056,6 +1077,7 @@ def run_endpoint(
             completed=False,
             restart_from_zero=True,
             window_start_line=0,
+            output_file=output_path,
         )
         _emit_api_log(
             api_log_callback,
@@ -1172,6 +1194,7 @@ def run_endpoint(
                 completed=False,
                 restart_from_zero=False,
                 window_start_line=window_start_line,
+                output_file=output_path,
             )
             _emit_api_log(
                 api_log_callback,
@@ -1306,6 +1329,7 @@ def run_endpoint(
         completed=True,
         restart_from_zero=False,
         window_start_line=window_start_line,
+        output_file=output_path,
     )
     _emit_api_log(
         api_log_callback,

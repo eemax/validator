@@ -56,7 +56,7 @@ data/raw/colorways.jsonl
 data/raw/materials.jsonl
 ```
 
-Later delta fetches can be stored under run directories:
+Delta fetches are written under immutable run directories:
 
 ```text
 data/raw/runs/2026-04-30T090000Z/styles.delta.jsonl
@@ -141,6 +141,14 @@ uv run centric-fetch run --config config/fetcher.yml --endpoint styles
 uv run centric-mdm fetch --config config/fetcher.yml --endpoint styles
 ```
 
+Run a fresh delta window with:
+
+```bash
+uv run centric-mdm fetch --config config/fetcher.yml --delta
+```
+
+Use `--resume` only to continue an interrupted fetch window from its checkpoint.
+
 Installation-specific fetch filters also live outside the public repo. The fetcher looks for
 private params in this order:
 
@@ -154,7 +162,8 @@ Useful modes inherited from the standalone fetcher:
 
 - `--resume` continues from endpoint checkpoints.
 - `--delta` uses `_modified_at` floors from the delta state file
-  (`CENTRIC_CONFIG_DIR/delta_fetcher.yml` or `.local/delta_fetcher.yml` by default).
+  (`CENTRIC_CONFIG_DIR/delta_fetcher.yml` or `.local/delta_fetcher.yml` by default) and writes
+  `data/raw/runs/<run-id>/<endpoint>.delta.jsonl`.
 - `--delta-dry-run` shows injected delta filters without fetching data.
 - `--months 24` fetches records modified in the last 24 calendar months.
 - `--log-level summary|http|debug` enables structured fetch logs.

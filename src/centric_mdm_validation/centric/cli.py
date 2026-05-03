@@ -56,6 +56,10 @@ def _utc_iso(value: datetime) -> str:
     return value.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def _delta_run_id(value: datetime) -> str:
+    return value.astimezone(UTC).strftime("%Y-%m-%dT%H%M%SZ")
+
+
 def _parse_utc_iso(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -716,6 +720,7 @@ def _build_run_kwargs(
 
     if delta_enabled:
         run_kwargs["append_output"] = True
+        run_kwargs["output_file_suffix"] = ".delta"
         run_kwargs["delta_floor"] = delta_floor
         resume_completed_hint = _resolve_resume_completed_hint(
             resume=resume,
@@ -924,6 +929,8 @@ def _run(args: argparse.Namespace) -> int:
         fetcher_cfg.output_dir = Path(args.output_dir)
     if args.checkpoint_dir:
         fetcher_cfg.checkpoint_dir = Path(args.checkpoint_dir)
+    if args.delta and not args.delta_dry_run:
+        fetcher_cfg.output_dir = fetcher_cfg.output_dir / "runs" / _delta_run_id(run_started_dt)
 
     selected_specs = _select_endpoints(endpoint_specs, args.endpoint)
 

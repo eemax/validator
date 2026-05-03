@@ -65,6 +65,28 @@ def test_pagination_uses_skip_limit_and_stops_on_short_page(tmp_path: Path, no_s
     assert len(output_lines) == 70
 
 
+def test_delta_output_uses_delta_suffix(tmp_path: Path, no_sleep: None) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v2/items":
+            return httpx.Response(200, json=[])
+        return httpx.Response(404)
+
+    endpoint = EndpointSpec(name="items", api_version="v2", path="items", limit=50)
+    ctx = _make_auth_ctx(tmp_path, handler)
+    cfg = _make_fetcher_cfg(tmp_path)
+
+    result = run_endpoint(
+        endpoint,
+        ctx,
+        cfg,
+        append_output=True,
+        output_file_suffix=".delta",
+    )
+
+    assert result.output_file == cfg.output_dir / "items.delta.jsonl"
+    assert result.output_file.is_file()
+
+
 def test_count_preflight_and_id_validation_pass(tmp_path: Path, no_sleep: None) -> None:
     seen_skips: list[int] = []
 
