@@ -15,6 +15,7 @@ from centric_mdm_validation.models import CentricProductPayload, CentricVariant
 ENDPOINT_FILES = {
     "styles": "styles.jsonl",
     "colorways": "colorways.jsonl",
+    "sizes": "sizes.jsonl",
     "seasons": "seasons.jsonl",
     "materials": "materials.jsonl",
 }

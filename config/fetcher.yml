@@ -51,6 +51,17 @@ endpoints:
       api_version: v2
       path: count/Colorway
       result_path: $.count
+  - name: sizes
+    api_version: v2
+    path: product_sizes
+    skip_param: skip
+    limit_param: limit
+    limit: 50
+    item_path: $
+    count_spec:
+      api_version: v2
+      path: count/ProductSize
+      result_path: $.count
   - name: boms
     api_version: v3
     path: apparel_bom_revisions

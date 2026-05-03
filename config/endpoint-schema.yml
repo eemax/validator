@@ -9,6 +9,11 @@ endpoints:
     modified_at_fields: [_modified_at]
     delete_field: active
     delete_when: false
+  sizes:
+    primary_key: id
+    modified_at_fields: [_modified_at]
+    delete_field: active
+    delete_when: false
   seasons:
     primary_key: id
     modified_at_fields: [_modified_at]

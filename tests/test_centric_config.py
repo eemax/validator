@@ -9,6 +9,7 @@ from centric_mdm_validation.centric.config import (
     resolve_fetch_params_path,
     resolve_private_config_path,
 )
+from centric_mdm_validation.centric.schema import load_endpoint_schemas
 
 
 def _write_config(path: Path, text: str) -> Path:
@@ -169,6 +170,25 @@ endpoints:
         "active": True,
         "custom_status": "approved",
     }
+
+
+def test_repo_config_fetches_product_sizes_as_sizes(monkeypatch) -> None:
+    monkeypatch.delenv(CONFIG_DIR_ENV_VAR, raising=False)
+
+    _, _, endpoints = load_fetcher_settings(Path("config/fetcher.yml"))
+    endpoint_by_name = {endpoint.name: endpoint for endpoint in endpoints}
+    sizes = endpoint_by_name["sizes"]
+
+    assert sizes.path == "product_sizes"
+    assert sizes.count_spec is not None
+    assert sizes.count_spec.path == "count/ProductSize"
+
+
+def test_repo_endpoint_schema_includes_sizes() -> None:
+    schemas = load_endpoint_schemas(Path("config/endpoint-schema.yml"))
+
+    assert schemas["sizes"].primary_key == "id"
+    assert schemas["sizes"].delete_field == "active"
 
 
 def test_private_config_path_prefers_explicit_then_config_dir(

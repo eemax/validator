@@ -23,6 +23,7 @@ DEFAULT_ENDPOINT_SCHEMAS: dict[str, EndpointSchema] = {
     for name in (
         "styles",
         "colorways",
+        "sizes",
         "seasons",
         "materials",
         "boms",
