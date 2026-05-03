@@ -60,6 +60,10 @@ def _delta_run_id(value: datetime) -> str:
     return value.astimezone(UTC).strftime("%Y-%m-%dT%H%M%SZ")
 
 
+def _window_run_id(value: datetime, months: int) -> str:
+    return f"{_delta_run_id(value)}-months{months}"
+
+
 def _parse_utc_iso(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -931,6 +935,11 @@ def _run(args: argparse.Namespace) -> int:
         fetcher_cfg.checkpoint_dir = Path(args.checkpoint_dir)
     if args.delta and not args.delta_dry_run:
         fetcher_cfg.output_dir = fetcher_cfg.output_dir / "runs" / _delta_run_id(run_started_dt)
+    elif args.months is not None:
+        fetcher_cfg.output_dir = fetcher_cfg.output_dir / "runs" / _window_run_id(
+            run_started_dt,
+            args.months,
+        )
 
     selected_specs = _select_endpoints(endpoint_specs, args.endpoint)
 

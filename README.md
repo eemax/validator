@@ -165,7 +165,8 @@ Useful modes inherited from the standalone fetcher:
   (`CENTRIC_CONFIG_DIR/delta_fetcher.yml` or `.local/delta_fetcher.yml` by default) and writes
   `data/raw/runs/<run-id>/<endpoint>.delta.jsonl`.
 - `--delta-dry-run` shows injected delta filters without fetching data.
-- `--months 24` fetches records modified in the last 24 calendar months.
+- `--months 24` fetches records modified in the last 24 calendar months and writes
+  `data/raw/runs/<run-id>-months24/<endpoint>.jsonl`.
 - `--log-level summary|http|debug` enables structured fetch logs.
 
 ## Project Boundary
