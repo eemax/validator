@@ -3,7 +3,9 @@
 Focused validator for Centric product data, starting with DPP readiness.
 
 The project fetches or receives Centric product data, projects it into a narrow validation
-payload, runs governed YAML rules, and creates readiness reports by brand/product.
+payload, runs governed YAML rules, and creates readiness reports by brand/product. Continuous
+delta fetches are ingested into a local DuckDB reconstruction store before validation payloads are
+materialized.
 
 ## Current State
 
@@ -16,6 +18,7 @@ payload, runs governed YAML rules, and creates readiness reports by brand/produc
 - Example payloads and tests
 - Centric API fetcher with pagination, retries, checkpoints, resume, delta mode,
   count preflight, ID integrity checks, and structured logs
+- DuckDB-backed ingest/reconstruction path for applying full and delta raw endpoint files
 
 ## Install
 
@@ -39,6 +42,59 @@ uv run centric-mdm project \
   --input-dir data/raw \
   --output data/results/projected-products.jsonl
 ```
+
+This legacy command projects directly from endpoint files in one directory. For continuous delta
+workflows, prefer the reconstruction store commands below.
+
+## Ingest And Reconstruct
+
+Raw endpoint files are immutable evidence. A full fetch may produce files such as:
+
+```text
+data/raw/styles.jsonl
+data/raw/colorways.jsonl
+data/raw/materials.jsonl
+```
+
+Later delta fetches can be stored under run directories:
+
+```text
+data/raw/runs/2026-04-30T090000Z/styles.delta.jsonl
+data/raw/runs/2026-04-30T090000Z/bomrows.delta.jsonl
+```
+
+Catch the local DuckDB store up to all unapplied raw files:
+
+```bash
+uv run centric-mdm ingest \
+  --raw-dir data/raw \
+  --db data/centric.duckdb
+```
+
+Project the current reconstructed store state back to the validator JSONL contract:
+
+```bash
+uv run centric-mdm reconstruct \
+  --db data/centric.duckdb \
+  --output data/results/projected-products.jsonl
+```
+
+Or run ingest, reconstruct, and validation together:
+
+```bash
+uv run centric-mdm pipeline \
+  --raw-dir data/raw \
+  --db data/centric.duckdb \
+  --projected-output data/results/projected-products.jsonl \
+  --validation-output data/results/dpp-readiness-results.json
+```
+
+Endpoint merge behavior lives in `config/endpoint-schema.yml`. Each endpoint can define its
+primary key, modified timestamp fields, and inactive/tombstone handling.
+
+The detailed reconstruction rules are expected to be proprietary. They should live outside the
+public repo and be resolved later from an explicit CLI path, `CENTRIC_RECONSTRUCTION_CONFIG`,
+`CENTRIC_CONFIG_DIR/reconstruction.yml`, or `.local/reconstruction.yml`.
 
 Company-specific Centric attribute names live outside the public repo. Put private config under
 `CENTRIC_CONFIG_DIR`, or use `.local/` for repo-adjacent local work. `.local/` is gitignored.
