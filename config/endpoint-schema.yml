@@ -1,46 +1,46 @@
 endpoints:
   styles:
     primary_key: id
-    modified_at_fields: [_modified_at, modified_at]
+    modified_at_fields: [_modified_at]
     delete_field: active
     delete_when: false
   colorways:
     primary_key: id
-    modified_at_fields: [_modified_at, modified_at]
+    modified_at_fields: [_modified_at]
     delete_field: active
     delete_when: false
   seasons:
     primary_key: id
-    modified_at_fields: [_modified_at, modified_at]
+    modified_at_fields: [_modified_at]
     delete_field: active
     delete_when: false
   materials:
     primary_key: id
-    modified_at_fields: [_modified_at, modified_at]
+    modified_at_fields: [_modified_at]
     delete_field: active
     delete_when: false
   boms:
     primary_key: id
-    modified_at_fields: [_modified_at, modified_at]
+    modified_at_fields: [_modified_at]
     delete_field: active
     delete_when: false
   bomrows:
     primary_key: id
-    modified_at_fields: [_modified_at, modified_at]
+    modified_at_fields: [_modified_at]
     delete_field: active
     delete_when: false
   supplierquotes:
     primary_key: id
-    modified_at_fields: [_modified_at, modified_at]
+    modified_at_fields: [_modified_at]
     delete_field: active
     delete_when: false
   suppliers:
     primary_key: id
-    modified_at_fields: [_modified_at, modified_at]
+    modified_at_fields: [_modified_at]
     delete_field: active
     delete_when: false
   factories:
     primary_key: id
-    modified_at_fields: [_modified_at, modified_at]
+    modified_at_fields: [_modified_at]
     delete_field: active
     delete_when: false

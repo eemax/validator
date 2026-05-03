@@ -13,7 +13,7 @@ DEFAULT_ENDPOINT_SCHEMA_PATH = Path("config/endpoint-schema.yml")
 class EndpointSchema:
     name: str
     primary_key: str = "id"
-    modified_at_fields: tuple[str, ...] = ("_modified_at", "modified_at")
+    modified_at_fields: tuple[str, ...] = ("_modified_at",)
     delete_field: str | None = "active"
     delete_when: Any = False
 
