@@ -94,8 +94,8 @@ Endpoint merge behavior lives in `config/endpoint-schema.yml`. Each endpoint can
 primary key, modified timestamp fields, and inactive/tombstone handling.
 
 The detailed reconstruction rules are expected to be proprietary. They should live outside the
-public repo and be resolved later from an explicit CLI path, `CENTRIC_RECONSTRUCTION_CONFIG`,
-`CENTRIC_CONFIG_DIR/reconstruction.yml`, or `.local/reconstruction.yml`.
+public repo and be resolved from `CENTRIC_CONFIG_DIR/reconstruction.py` or
+`.local/reconstruction.py`.
 
 Company-specific Centric attribute names live outside the public repo. Put private config under
 `CENTRIC_CONFIG_DIR`, or use `.local/` for repo-adjacent local work. `.local/` is gitignored.

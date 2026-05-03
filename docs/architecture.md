@@ -43,17 +43,17 @@ relationship is modeled, and reconstruct product payloads from current styles, v
 and BOM state.
 
 The detailed product graph reconstruction logic is installation-specific and proprietary. It should
-not be committed to the public repo. The future reconstruction loader should resolve private rules
-in this order:
+not be committed to the public repo. The reconstruction loader resolves private logic in this order:
 
-1. Explicit CLI path, for example `--reconstruction /path/to/reconstruction.yml`.
-2. Exported environment variable, for example `CENTRIC_RECONSTRUCTION_CONFIG`.
-3. `CENTRIC_CONFIG_DIR/reconstruction.yml`.
-4. `.local/reconstruction.yml`.
+1. Explicit Python module path passed by internal callers.
+2. `CENTRIC_CONFIG_DIR/reconstruction.py`.
+3. `.local/reconstruction.py`.
 
-That private spec is expected to define endpoint relationships and product assembly rules, such as
-how BOM rows attach to styles, how current BOM revisions are selected, which material/supplier/
-factory relationships feed DPP attributes, and how affected product IDs are derived from deltas.
+That private module is expected to define `reconstruct_projected_products(records_by_endpoint, *,
+mapping=None)` and return `CentricProductPayload` objects. It owns endpoint relationships and
+product assembly rules, such as how BOM rows attach to styles, how current BOM revisions are
+selected, which material/supplier/factory relationships feed DPP attributes, and how affected
+product IDs are derived from deltas.
 
 The initial store implementation uses one generic DuckDB table for current endpoint records:
 
@@ -84,10 +84,8 @@ Endpoint merge behavior is configured by `config/endpoint-schema.yml`.
 
 ## Next Technical Steps
 
-1. Add a private reconstruction spec loader using explicit path, environment variable,
-   `CENTRIC_CONFIG_DIR/reconstruction.yml`, or `.local/reconstruction.yml`.
-2. Expand reconstruction beyond the current styles/colorways/seasons/materials projection into BOM
-   rows, suppliers, factories, and supplier quotes using that private spec.
+1. Expand private reconstruction beyond the current styles/colorways/seasons/materials projection
+   into BOM rows, suppliers, factories, and supplier quotes.
 3. Add affected-product tracking for incremental reconstruction.
 4. Add richer project-specific endpoint examples once the exact Centric payloads are finalized.
 5. Add DuckDB-backed report queries once result history spans multiple runs.

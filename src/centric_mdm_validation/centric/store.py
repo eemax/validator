@@ -10,7 +10,8 @@ from typing import Any
 
 import duckdb
 
-from centric_mdm_validation.centric.mapper import ProjectionMapping, project_products
+from centric_mdm_validation.centric.mapper import ProjectionMapping
+from centric_mdm_validation.centric.reconstruction import reconstruct_products_from_records
 from centric_mdm_validation.centric.schema import EndpointSchema
 from centric_mdm_validation.io import read_json_records, write_jsonl
 from centric_mdm_validation.models import CentricProductPayload
@@ -180,7 +181,7 @@ def reconstruct_products(
 ) -> list[CentricProductPayload]:
     with duckdb.connect(str(db_path)) as conn:
         records_by_endpoint = load_current_endpoint_records(conn)
-    return project_products(records_by_endpoint, mapping=mapping)
+    return reconstruct_products_from_records(records_by_endpoint, mapping=mapping)
 
 
 def load_current_endpoint_records(
