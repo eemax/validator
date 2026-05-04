@@ -91,7 +91,19 @@ uv run centric-mdm pipeline \
 ```
 
 Endpoint merge behavior lives in `config/endpoint-schema.yml`. Each endpoint can define its
-primary key, modified timestamp fields, and inactive/tombstone handling.
+primary key, modified timestamp fields, inactive/tombstone handling, and full-file semantics.
+The current full-file mode is `upsert_only`: a non-delta file updates records it contains, but
+does not delete records merely because they are absent from that file. This is intentional for
+month-window fetches such as `--months 2`, which are filtered windows rather than authoritative
+endpoint replacements.
+
+The DuckDB store keeps raw JSON payload text for the current endpoint record while also deriving
+typed timestamp columns and current-state views. `current_endpoint_records` exposes all current
+records with `payload_json`, `modified_at_ts`, and `ingested_at_ts`; endpoint-specific views such
+as `current_styles`, `current_bomrows`, and `current_supplierquotes` are created from the endpoint
+schema. These views are the intended boundary for letting DuckDB handle set-based extraction,
+joins, and affected-product discovery while private Python reconstruction handles proprietary
+product semantics.
 
 The detailed reconstruction rules are expected to be proprietary. They should live outside the
 public repo and be resolved from `CENTRIC_CONFIG_DIR/reconstruction.py` or

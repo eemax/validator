@@ -16,6 +16,7 @@ class EndpointSchema:
     modified_at_fields: tuple[str, ...] = ("_modified_at",)
     delete_field: str | None = "active"
     delete_when: Any = False
+    full_snapshot_mode: str = "upsert_only"
 
 
 DEFAULT_ENDPOINT_SCHEMAS: dict[str, EndpointSchema] = {
@@ -67,6 +68,9 @@ def load_endpoint_schemas(path: Path | None = None) -> dict[str, EndpointSchema]
             ),
             delete_field=_optional_string(config.get("delete_field", default.delete_field)),
             delete_when=config.get("delete_when", default.delete_when),
+            full_snapshot_mode=str(
+                config.get("full_snapshot_mode", default.full_snapshot_mode)
+            ),
         )
     return schemas
 

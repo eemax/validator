@@ -189,6 +189,7 @@ def test_repo_endpoint_schema_includes_sizes() -> None:
 
     assert schemas["sizes"].primary_key == "id"
     assert schemas["sizes"].delete_field == "active"
+    assert schemas["sizes"].full_snapshot_mode == "upsert_only"
 
 
 def test_private_config_path_prefers_explicit_then_config_dir(

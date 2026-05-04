@@ -71,6 +71,7 @@ def ingest_raw_dir(
 
     with duckdb.connect(str(db_path)) as conn:
         initialize_store(conn)
+        ensure_current_endpoint_views(conn, schemas)
         total_files = len(raw_files)
         for file_index, raw_file in enumerate(raw_files, start=1):
             content_hash = _sha256(raw_file.path)
@@ -92,6 +93,7 @@ def ingest_raw_dir(
                 )
 
             schema = schemas.get(raw_file.endpoint, EndpointSchema(name=raw_file.endpoint))
+            _validate_full_snapshot_mode(raw_file, schema)
             ingested_at = _format_datetime(datetime.now(UTC))
             _emit_ingest_progress(
                 progress,
@@ -114,9 +116,10 @@ def ingest_raw_dir(
                     """
                     INSERT INTO applied_raw_files (
                         file_path, endpoint, source_run_id, is_delta, record_count,
-                        content_sha256, manifest_path, manifest_sha256, run_mode, ingested_at
+                        content_sha256, manifest_path, manifest_sha256, run_mode,
+                        ingested_at, ingested_at_ts, full_snapshot_mode
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, try_cast(? AS TIMESTAMP), ?)
                     """,
                     [
                         str(raw_file.path),
@@ -129,6 +132,8 @@ def ingest_raw_dir(
                         raw_file.manifest_sha256,
                         raw_file.run_mode,
                         ingested_at,
+                        ingested_at,
+                        schema.full_snapshot_mode,
                     ],
                 )
                 conn.execute("COMMIT")
@@ -159,6 +164,15 @@ def ingest_raw_dir(
         records_upserted=records_upserted,
         records_deleted=records_deleted,
         endpoints=dict(sorted(endpoints.items())),
+    )
+
+
+def _validate_full_snapshot_mode(raw_file: RawFile, schema: EndpointSchema) -> None:
+    if raw_file.is_delta or schema.full_snapshot_mode == "upsert_only":
+        return
+    raise ValueError(
+        f"Unsupported full_snapshot_mode={schema.full_snapshot_mode!r} for "
+        f"{raw_file.endpoint}. Only 'upsert_only' is currently implemented."
     )
 
 
@@ -274,13 +288,25 @@ def initialize_store(conn: duckdb.DuckDBPyConnection) -> None:
             manifest_path VARCHAR,
             manifest_sha256 VARCHAR,
             run_mode VARCHAR,
-            ingested_at VARCHAR NOT NULL
+            ingested_at VARCHAR NOT NULL,
+            ingested_at_ts TIMESTAMP,
+            full_snapshot_mode VARCHAR
         )
         """
     )
     _ensure_column(conn, "applied_raw_files", "manifest_path", "VARCHAR")
     _ensure_column(conn, "applied_raw_files", "manifest_sha256", "VARCHAR")
     _ensure_column(conn, "applied_raw_files", "run_mode", "VARCHAR")
+    _ensure_column(conn, "applied_raw_files", "ingested_at_ts", "TIMESTAMP")
+    _ensure_column(conn, "applied_raw_files", "full_snapshot_mode", "VARCHAR")
+    conn.execute(
+        """
+        UPDATE applied_raw_files
+        SET ingested_at_ts = try_cast(ingested_at AS TIMESTAMP)
+        WHERE ingested_at_ts IS NULL
+          AND ingested_at IS NOT NULL
+        """
+    )
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS endpoint_records (
@@ -288,13 +314,62 @@ def initialize_store(conn: duckdb.DuckDBPyConnection) -> None:
             record_id VARCHAR NOT NULL,
             payload VARCHAR NOT NULL,
             modified_at VARCHAR,
+            modified_at_ts TIMESTAMP,
             source_file VARCHAR NOT NULL,
             source_run_id VARCHAR NOT NULL,
             ingested_at VARCHAR NOT NULL,
+            ingested_at_ts TIMESTAMP,
             PRIMARY KEY (endpoint, record_id)
         )
         """
     )
+    _ensure_column(conn, "endpoint_records", "modified_at_ts", "TIMESTAMP")
+    _ensure_column(conn, "endpoint_records", "ingested_at_ts", "TIMESTAMP")
+    conn.execute(
+        """
+        UPDATE endpoint_records
+        SET
+            modified_at_ts = coalesce(modified_at_ts, try_cast(modified_at AS TIMESTAMP)),
+            ingested_at_ts = coalesce(ingested_at_ts, try_cast(ingested_at AS TIMESTAMP))
+        WHERE (modified_at_ts IS NULL AND modified_at IS NOT NULL)
+           OR (ingested_at_ts IS NULL AND ingested_at IS NOT NULL)
+        """
+    )
+    ensure_current_endpoint_views(conn)
+
+
+def ensure_current_endpoint_views(
+    conn: duckdb.DuckDBPyConnection,
+    schemas: dict[str, EndpointSchema] | None = None,
+) -> None:
+    conn.execute(
+        """
+        CREATE OR REPLACE VIEW current_endpoint_records AS
+        SELECT
+            endpoint,
+            record_id,
+            payload,
+            payload::JSON AS payload_json,
+            modified_at AS modified_at_raw,
+            modified_at_ts,
+            source_file,
+            source_run_id,
+            ingested_at AS ingested_at_raw,
+            ingested_at_ts
+        FROM endpoint_records
+        """
+    )
+    if schemas is None:
+        return
+    for endpoint in schemas:
+        conn.execute(
+            f"""
+            CREATE OR REPLACE VIEW {_quote_identifier("current_" + endpoint)} AS
+            SELECT *
+            FROM current_endpoint_records
+            WHERE endpoint = {_quote_literal(endpoint)}
+            """,
+        )
 
 
 def _applied_hash(conn: duckdb.DuckDBPyConnection, path: Path) -> str | None:
@@ -316,6 +391,7 @@ def _apply_records_for_file(
 ) -> tuple[int, int, int]:
     conn.execute("DROP TABLE IF EXISTS ingest_stage")
     modified_expr = _modified_at_sql_expr(schema)
+    modified_ts_expr = _modified_at_ts_sql_expr(schema)
     delete_expr = _delete_sql_expr(schema)
     conn.execute(
         f"""
@@ -337,9 +413,11 @@ def _apply_records_for_file(
                 json_extract_string(payload, ?) AS record_id,
                 payload,
                 {modified_expr} AS modified_at,
+                {modified_ts_expr} AS modified_at_ts,
                 ? AS source_file,
                 ? AS source_run_id,
                 ? AS ingested_at,
+                try_cast(? AS TIMESTAMP) AS ingested_at_ts,
                 coalesce({delete_expr}, false) AS is_delete
             FROM lines
         )
@@ -354,6 +432,7 @@ def _apply_records_for_file(
             str(raw_file.path),
             raw_file.source_run_id,
             ingested_at,
+            ingested_at,
         ],
     )
 
@@ -367,14 +446,18 @@ def _apply_records_for_file(
             record_id,
             payload,
             modified_at,
+            modified_at_ts,
             source_file,
             source_run_id,
             ingested_at,
+            ingested_at_ts,
             is_delete
         FROM ingest_stage
         QUALIFY ROW_NUMBER() OVER (
             PARTITION BY endpoint, record_id
             ORDER BY
+                modified_at_ts IS NOT NULL DESC,
+                modified_at_ts DESC NULLS LAST,
                 modified_at IS NOT NULL DESC,
                 modified_at DESC NULLS LAST,
                 row_order DESC
@@ -390,9 +473,9 @@ def _apply_records_for_file(
           ON existing.endpoint = winners.endpoint
          AND existing.record_id = winners.record_id
         WHERE existing.record_id IS NULL
-           OR winners.modified_at IS NULL
-           OR existing.modified_at IS NULL
-           OR winners.modified_at >= existing.modified_at
+           OR winners.modified_at_ts IS NULL
+           OR existing.modified_at_ts IS NULL
+           OR winners.modified_at_ts >= existing.modified_at_ts
         """
     )
 
@@ -414,10 +497,12 @@ def _apply_records_for_file(
     conn.execute(
         """
         INSERT INTO endpoint_records (
-            endpoint, record_id, payload, modified_at, source_file, source_run_id, ingested_at
+            endpoint, record_id, payload, modified_at, modified_at_ts, source_file,
+            source_run_id, ingested_at, ingested_at_ts
         )
         SELECT
-            endpoint, record_id, payload, modified_at, source_file, source_run_id, ingested_at
+            endpoint, record_id, payload, modified_at, modified_at_ts, source_file,
+            source_run_id, ingested_at, ingested_at_ts
         FROM ingest_applicable
         WHERE NOT is_delete
         """
@@ -431,6 +516,13 @@ def _modified_at_sql_expr(schema: EndpointSchema) -> str:
         return "NULL"
     extracts = ", ".join(f"json_extract_string(payload, '{field}')" for field in fields)
     return f"coalesce({extracts})"
+
+
+def _modified_at_ts_sql_expr(schema: EndpointSchema) -> str:
+    modified_expr = _modified_at_sql_expr(schema)
+    if modified_expr == "NULL":
+        return "NULL"
+    return f"try_cast({modified_expr} AS TIMESTAMP)"
 
 
 def _delete_sql_expr(schema: EndpointSchema) -> str:
@@ -448,6 +540,14 @@ def _delete_when_text(value: Any) -> str:
 
 def _json_path(field: str) -> str:
     return '$."' + field.replace('"', '\\"') + '"'
+
+
+def _quote_identifier(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
+def _quote_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
 
 
 def _ensure_column(

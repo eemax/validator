@@ -2,7 +2,7 @@ import json
 
 import duckdb
 
-from centric_mdm_validation.centric.schema import load_endpoint_schemas
+from centric_mdm_validation.centric.schema import EndpointSchema, load_endpoint_schemas
 from centric_mdm_validation.centric.store import (
     ingest_raw_dir,
     load_current_endpoint_records,
@@ -123,6 +123,39 @@ def test_ingest_raw_dir_dedupes_records_within_file_by_modified_at(tmp_path) -> 
     assert payloads[0].style_name == "Newer Style"
 
 
+def test_ingest_raw_dir_stores_typed_timestamps_and_current_views(tmp_path) -> None:
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    _write_jsonl(
+        raw_dir / "styles.jsonl",
+        [
+            {
+                "id": "S1",
+                "_modified_at": "2026-04-30T09:00:00Z",
+                "active": True,
+                "node_name": "Typed Style",
+            }
+        ],
+    )
+    db_path = tmp_path / "centric.duckdb"
+
+    ingest_raw_dir(raw_dir, db_path, schemas=load_endpoint_schemas())
+
+    with duckdb.connect(str(db_path)) as conn:
+        row = conn.execute(
+            """
+            SELECT record_id, modified_at_raw, modified_at_ts, ingested_at_ts
+            FROM current_styles
+            WHERE record_id = 'S1'
+            """
+        ).fetchone()
+
+    assert row[0] == "S1"
+    assert row[1] == "2026-04-30T09:00:00Z"
+    assert row[2].isoformat() == "2026-04-30T09:00:00"
+    assert row[3] is not None
+
+
 def test_ingest_raw_dir_applies_active_false_as_delete(tmp_path) -> None:
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
@@ -151,6 +184,27 @@ def test_ingest_raw_dir_applies_active_false_as_delete(tmp_path) -> None:
 
     assert result.records_deleted == 1
     assert payloads == []
+
+
+def test_ingest_raw_dir_rejects_unimplemented_full_snapshot_mode(tmp_path) -> None:
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    _write_jsonl(raw_dir / "styles.jsonl", [{"id": "S1", "active": True}])
+    db_path = tmp_path / "centric.duckdb"
+
+    schemas = {
+        "styles": EndpointSchema(
+            name="styles",
+            full_snapshot_mode="replace_endpoint_scope",
+        )
+    }
+
+    try:
+        ingest_raw_dir(raw_dir, db_path, schemas=schemas)
+    except ValueError as exc:
+        assert "replace_endpoint_scope" in str(exc)
+    else:
+        raise AssertionError("Expected unsupported full_snapshot_mode to fail")
 
 
 def test_load_current_endpoint_records_returns_endpoint_groups(tmp_path) -> None:
@@ -193,7 +247,14 @@ def test_ingest_raw_dir_records_manifest_metadata(tmp_path) -> None:
     with duckdb.connect(str(db_path)) as conn:
         row = conn.execute(
             """
-            SELECT source_run_id, is_delta, run_mode, manifest_path, manifest_sha256
+            SELECT
+                source_run_id,
+                is_delta,
+                run_mode,
+                manifest_path,
+                manifest_sha256,
+                ingested_at_ts,
+                full_snapshot_mode
             FROM applied_raw_files
             WHERE endpoint = 'styles'
             """
@@ -205,6 +266,8 @@ def test_ingest_raw_dir_records_manifest_metadata(tmp_path) -> None:
     assert row[3].endswith("manifest.json")
     assert isinstance(row[4], str)
     assert len(row[4]) == 64
+    assert row[5] is not None
+    assert row[6] == "upsert_only"
 
 
 def _write_jsonl(path, records: list[dict]) -> None:
