@@ -347,7 +347,6 @@ def load_master_reconstruction(
     ).fetchall()
     source_refs = _load_reconstruction_source_refs(conn)
     warnings = _load_reconstruction_warnings(conn)
-    relation_records = _load_master_relation_records(conn)
     return [
         ReconstructedProduct(
             product_id=str(product_id),
@@ -355,10 +354,7 @@ def load_master_reconstruction(
             brand_code=brand_code,
             season=season,
             product_type_code=product_type_code,
-            graph=_hydrate_master_graph(
-                json.loads(graph_json),
-                relation_records.get(str(product_id), {}),
-            ),
+            graph=json.loads(graph_json),
             source_refs=tuple(source_refs.get(str(product_id), [])),
             warnings=tuple(warnings.get(str(product_id), [])),
         )
@@ -633,68 +629,12 @@ _MASTER_RECORD_BUCKETS = {
     "suppliers",
 }
 
-_RELATION_GRAPH_BUCKETS = {
-    "style": "style",
-    "season": "seasons",
-    "colorway": "colorways",
-    "size": "sizes",
-    "bom": "boms",
-    "bom_row": "bom_rows",
-    "material": "materials",
-    "supplier_quote": "supplier_quotes",
-    "factory": "factories",
-    "supplier": "suppliers",
-}
-
-
 def _compact_master_graph(graph: dict[str, Any]) -> dict[str, Any]:
     return {
         key: value
         for key, value in graph.items()
         if key not in _MASTER_RECORD_BUCKETS
     }
-
-
-def _hydrate_master_graph(
-    graph: dict[str, Any],
-    relation_records: dict[str, list[dict[str, Any]]],
-) -> dict[str, Any]:
-    hydrated = dict(graph)
-    hydrated.setdefault("style", None)
-    for bucket in _MASTER_RECORD_BUCKETS - {"style"}:
-        hydrated.setdefault(bucket, [])
-    for relation_type, records in relation_records.items():
-        bucket = _RELATION_GRAPH_BUCKETS.get(relation_type)
-        if bucket is None:
-            continue
-        if bucket == "style":
-            hydrated["style"] = records[0] if records else None
-        else:
-            hydrated[bucket] = records
-    return hydrated
-
-
-def _load_master_relation_records(
-    conn: duckdb.DuckDBPyConnection,
-) -> dict[str, dict[str, list[dict[str, Any]]]]:
-    rows = conn.execute(
-        """
-        SELECT refs.product_id, refs.relation_type, records.payload
-        FROM reconstruction_source_refs refs
-        JOIN endpoint_records records
-          ON records.endpoint = refs.source_endpoint
-         AND records.record_id = refs.source_record_id
-        ORDER BY refs.product_id, refs.relation_type, refs.source_record_id
-        """
-    ).fetchall()
-    products: defaultdict[str, defaultdict[str, list[dict[str, Any]]]] = defaultdict(
-        lambda: defaultdict(list)
-    )
-    for product_id, relation_type, payload in rows:
-        if relation_type is None:
-            continue
-        products[str(product_id)][str(relation_type)].append(json.loads(payload))
-    return {product_id: dict(relations) for product_id, relations in products.items()}
 
 
 def _load_reconstruction_warnings(

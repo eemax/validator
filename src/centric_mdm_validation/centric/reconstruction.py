@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from centric_mdm_validation.centric.config import resolve_optional_private_config_path
 
 RECONSTRUCTION_CONFIG_PATH = Path("reconstruction.py")
-DEFAULT_PROJECTION_TARGET = "dpp"
+DEFAULT_PROJECTION_TARGET = "check"
 
 
 @dataclass(frozen=True)
@@ -69,7 +69,7 @@ def reconstruct_master_products_from_records(
     *,
     reconstruction_path: Path | None = None,
 ) -> list[ReconstructedProduct]:
-    """Build the target-agnostic master reconstruction graph."""
+    """Build compact style reconstruction state."""
 
     module = load_private_reconstruction_module(reconstruction_path)
     if module is not None:
@@ -105,19 +105,24 @@ def inspect_reconstruction_runtime(
     module = load_private_reconstruction_module(path)
     has_master_hook = callable(getattr(module, "reconstruct_master_products", None))
     has_projection_hook = callable(getattr(module, "project_reconstructed_products", None))
+    projection_strategy = (
+        _default_projection_strategy(target)
+        if target == DEFAULT_PROJECTION_TARGET
+        else (
+            "private project_reconstructed_products hook"
+            if has_projection_hook
+            else _default_projection_strategy(target)
+        )
+    )
 
     return ReconstructionRuntimeInfo(
         path=path,
         master_strategy=(
-            "private reconstruct_master_products hook"
+            "private reconstruction hook"
             if has_master_hook
             else "missing private reconstruct_master_products hook"
         ),
-        projection_strategy=(
-            "private project_reconstructed_products hook"
-            if has_projection_hook
-            else _default_projection_strategy(target)
-        ),
+        projection_strategy=projection_strategy,
     )
 
 
@@ -127,11 +132,11 @@ def project_master_products(
     target: str = DEFAULT_PROJECTION_TARGET,
     reconstruction_path: Path | None = None,
 ) -> list[BaseModel | dict[str, Any]]:
-    """Project master reconstruction output into a target-specific payload contract."""
+    """Project reconstruction output into a check or target-specific payload contract."""
 
     products = list(reconstructed_products)
-    if target in {"master", "debug"}:
-        return [product.graph for product in products]
+    if target == DEFAULT_PROJECTION_TARGET:
+        return [_project_reconstruction_check(product) for product in products]
 
     module = load_private_reconstruction_module(reconstruction_path)
     if module is not None:
@@ -187,8 +192,11 @@ def _placeholder_master_products(
                 brand_code=_optional_string(style.get("brand_code")),
                 product_type_code=_optional_string(style.get("product_type")),
                 graph={
-                    "product_id": style_id,
-                    "style": style,
+                    "style_id": style_id,
+                    "relationship_ids": {},
+                    "relationships": {},
+                    "applicability": {},
+                    "unresolved_refs": [],
                     "placeholder": True,
                 },
                 source_refs=(
@@ -204,9 +212,93 @@ def _placeholder_master_products(
 
 
 def _default_projection_strategy(target: str) -> str:
-    if target in {"master", "debug"}:
-        return "public master graph output"
+    if target == DEFAULT_PROJECTION_TARGET:
+        return "public compact reconstruction check"
     return "private projection required"
+
+
+def _project_reconstruction_check(product: ReconstructedProduct) -> dict[str, Any]:
+    graph = product.graph if isinstance(product.graph, Mapping) else {}
+    relationships = _mapping_dict(graph.get("relationships"))
+    relationship_ids = _relationship_ids(relationships)
+    applicability = {
+        key: value
+        for key, value in relationships.items()
+        if key.endswith("_applicability")
+    }
+    resolved_records = _resolved_record_counts(product.source_refs)
+    warnings = [_warning_record(warning) for warning in product.warnings]
+    unresolved_refs = _mapping_list(graph.get("unresolved_refs"))
+    return {
+        "style_id": product.style_id or product.product_id,
+        "relationship_ids": relationship_ids,
+        "counts": {
+            "relationship_ids": _value_counts(relationship_ids),
+            "resolved_records": resolved_records,
+            "unresolved_refs": len(unresolved_refs),
+            "warnings": len(warnings),
+        },
+        "applicability": applicability,
+        "unresolved_refs": unresolved_refs,
+        "warnings": warnings,
+    }
+
+
+def _relationship_ids(relationships: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in relationships.items()
+        if not key.endswith("_applicability")
+    }
+
+
+def _value_counts(values: Mapping[str, Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for key, value in values.items():
+        if isinstance(value, list | dict):
+            counts[key] = len(value)
+        elif value in (None, ""):
+            counts[key] = 0
+        else:
+            counts[key] = 1
+    return counts
+
+
+def _resolved_record_counts(
+    source_refs: Iterable[ReconstructionSourceRef],
+) -> dict[str, int]:
+    counts: dict[str, set[str]] = {}
+    for source_ref in source_refs:
+        if source_ref.relation_type is None or source_ref.relation_type == "style":
+            continue
+        bucket = _relation_bucket(source_ref.relation_type)
+        counts.setdefault(bucket, set()).add(source_ref.record_id)
+    return {bucket: len(record_ids) for bucket, record_ids in sorted(counts.items())}
+
+
+def _relation_bucket(relation_type: str) -> str:
+    buckets = {
+        "season": "seasons",
+        "colorway": "colorways",
+        "size": "sizes",
+        "bom": "boms",
+        "bom_row": "bom_rows",
+        "material": "materials",
+        "supplier_quote": "supplier_quotes",
+        "factory": "factories",
+        "supplier": "suppliers",
+    }
+    return buckets.get(relation_type, relation_type)
+
+
+def _warning_record(warning: ReconstructionWarning) -> dict[str, Any]:
+    return {
+        "code": warning.code,
+        "message": warning.message,
+        "severity": warning.severity,
+        "source_endpoint": warning.source_endpoint,
+        "source_record_id": warning.source_record_id,
+    }
 
 
 def _coerce_reconstructed_product(
@@ -266,6 +358,12 @@ def _mapping_list(value: Any) -> list[Mapping[str, Any]]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, Mapping)]
+
+
+def _mapping_dict(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    return dict(value)
 
 
 def _coerce_projected_payload(payload: BaseModel | Mapping[str, Any]) -> BaseModel | dict[str, Any]:

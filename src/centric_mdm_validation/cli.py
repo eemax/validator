@@ -15,9 +15,13 @@ from centric_mdm_validation.centric.store import (
     write_projected_products_from_master,
 )
 from centric_mdm_validation.io import read_json_records, write_json
-from centric_mdm_validation.models import CentricProductPayload
-from centric_mdm_validation.reporting import DppReadinessReporter
-from centric_mdm_validation.validation import DppReadinessValidator, DppRuleSet
+from centric_mdm_validation.models import CentricProductPayload, ReconstructionCheckPayload
+from centric_mdm_validation.reporting import DppReadinessReporter, ReconstructionCheckReporter
+from centric_mdm_validation.validation import (
+    DppReadinessValidator,
+    DppRuleSet,
+    ReconstructionCheckValidator,
+)
 
 app = typer.Typer(help="Centric MDM validation tools.")
 
@@ -34,8 +38,12 @@ RulesOption = Annotated[
 ]
 RULES_CONFIG_PATH = Path("rules/dpp-readiness.yml")
 DEFAULT_DB_PATH = Path("data/centric.duckdb")
-DEFAULT_MASTER_RECONSTRUCTION_PATH = Path("data/results/master-products.jsonl")
+DEFAULT_RECONSTRUCTION_CHECK_PATH = Path("data/results/reconstruction-check.jsonl")
+DEFAULT_RECONSTRUCTION_CHECK_RESULTS_PATH = Path("data/results/reconstruction-check-results.json")
 DEFAULT_PROJECTED_PRODUCTS_PATH = Path("data/results/projected-products.jsonl")
+DEFAULT_DPP_RESULTS_PATH = Path("data/results/dpp-readiness-results.json")
+DEFAULT_RECONSTRUCTION_CHECK_REPORT_DIR = Path("reports/reconstruction-check")
+DEFAULT_DPP_REPORT_DIR = Path("reports/dpp-readiness")
 
 
 @app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
@@ -80,30 +88,31 @@ def reconstruct(
         typer.Option("--db", help="DuckDB reconstruction store."),
     ] = DEFAULT_DB_PATH,
     output: Annotated[
-        Path,
-        typer.Option("--output", "-o", help="Target projection JSONL."),
-    ] = DEFAULT_MASTER_RECONSTRUCTION_PATH,
+        Path | None,
+        typer.Option("--output", "-o", help="Output JSONL."),
+    ] = None,
     target: Annotated[
         str,
-        typer.Option("--target", "-t", help="Projection target to materialize from master state."),
-    ] = "master",
+        typer.Option("--target", "-t", help="Projection target to materialize."),
+    ] = "check",
 ) -> None:
-    """Build master reconstruction state and materialize a target projection."""
+    """Build reconstruction state and materialize a compact check or target projection."""
 
+    output_path = output or _default_reconstruct_output(target)
     _echo_reconstruction_runtime(target)
-    _echo_step(f"Reconstruct: building master product graph from {db}")
+    _echo_step(f"Reconstruct: building style relationship state from {db}")
     master_result = rebuild_master_reconstruction(db)
     _echo_done(
-        f"Master reconstruction stored {master_result.products_reconstructed} products "
+        f"Reconstruction stored {master_result.products_reconstructed} styles "
         f"({master_result.source_refs} source refs, {master_result.warnings} warnings)"
     )
-    _echo_step(f"Reconstruct: projecting target {target!r} into {output}")
+    _echo_step(f"Reconstruct: writing target {target!r} into {output_path}")
     payloads = write_projected_products_from_master(
         db,
-        output,
+        output_path,
         target=target,
     )
-    _echo_done(f"Projected {len(payloads)} {target} payloads from master reconstruction")
+    _echo_done(f"Wrote {len(payloads)} {target} records to {output_path}")
 
 
 @app.command()
@@ -145,9 +154,9 @@ def pipeline(
     if target != "dpp":
         raise typer.BadParameter("Pipeline validation/reporting currently supports target 'dpp'.")
     _echo_reconstruction_runtime(target)
-    _echo_step("Pipeline: building master reconstruction")
+    _echo_step("Pipeline: building reconstruction state")
     master_result = rebuild_master_reconstruction(db)
-    _echo_done(f"Master reconstruction stored {master_result.products_reconstructed} products")
+    _echo_done(f"Reconstruction stored {master_result.products_reconstructed} styles")
     _echo_step(f"Pipeline: projecting {target} payloads")
     projected_payloads = write_projected_products_from_master(
         db,
@@ -174,48 +183,58 @@ def pipeline(
 @app.command()
 def validate(
     input_path: Annotated[
-        Path,
-        typer.Option("--input", "-i", help="Projected product JSON/JSONL."),
-    ],
+        Path | None,
+        typer.Option("--input", "-i", help="Input JSON/JSONL."),
+    ] = None,
+    target: Annotated[
+        str,
+        typer.Option("--target", "-t", help="Validation target."),
+    ] = "check",
     rules: RulesOption = None,
     output: Annotated[
-        Path,
+        Path | None,
         typer.Option("--output", "-o", help="Validation result JSON."),
-    ] = Path("data/results/dpp-readiness-results.json"),
+    ] = None,
 ) -> None:
-    """Validate projected Centric products for DPP readiness."""
+    """Validate reconstruction check or projected target payloads."""
 
-    _echo_step(f"Validate: reading projected products from {input_path}")
-    run = _validate(input_path, rules)
-    _echo_step(f"Validate: writing results to {output}")
-    write_json(output, run.model_dump(mode="json"))
+    input_file = input_path or _default_validate_input(target)
+    output_file = output or _default_validate_output(target)
+    _echo_step(f"Validate: reading {target} records from {input_file}")
+    run = _validate(input_file, rules, target=target)
+    _echo_step(f"Validate: writing results to {output_file}")
+    write_json(output_file, run.model_dump(mode="json"))
     _echo_done(
-        f"Validated {run.total_products} products: {run.ready_products} ready "
-        f"({run.readiness_percent}%). Results: {output}"
+        f"Validated {run.total_products} records: {run.ready_products} ready "
+        f"({run.readiness_percent}%). Results: {output_file}"
     )
 
 
 @app.command()
 def report(
     input_path: Annotated[
-        Path,
-        typer.Option("--input", "-i", help="Projected product JSON/JSONL."),
-    ],
+        Path | None,
+        typer.Option("--input", "-i", help="Input JSON/JSONL."),
+    ] = None,
+    target: Annotated[
+        str,
+        typer.Option("--target", "-t", help="Report target."),
+    ] = "check",
     rules: RulesOption = None,
     output_dir: Annotated[
-        Path,
+        Path | None,
         typer.Option("--output-dir", "-o", help="Directory for report files."),
-    ] = Path("reports/dpp-readiness"),
+    ] = None,
 ) -> None:
-    """Create DPP readiness reports."""
+    """Create reconstruction check or target readiness reports."""
 
-    _echo_step(f"Report: reading projected products from {input_path}")
-    run = _validate(input_path, rules)
-    _echo_step(f"Report: writing report files to {output_dir}")
-    DppReadinessReporter().write_all(run, output_dir)
-    _echo_done(
-        f"Wrote DPP readiness reports for {run.total_products} products into {output_dir}"
-    )
+    input_file = input_path or _default_validate_input(target)
+    output_path = output_dir or _default_report_output_dir(target)
+    _echo_step(f"Report: reading {target} records from {input_file}")
+    run = _validate(input_file, rules, target=target)
+    _echo_step(f"Report: writing report files to {output_path}")
+    _reporter_for_target(target).write_all(run, output_path)
+    _echo_done(f"Wrote {target} reports for {run.total_products} records into {output_path}")
 
 
 def _run_ingest(raw_dir: Path, db: Path, schema: Path | None):
@@ -261,7 +280,7 @@ def _echo_reconstruction_runtime(target: str) -> None:
         _echo_step("Reconstruction: using public fallback module")
     else:
         _echo_step(f"Reconstruction: using private module {runtime.path}")
-    _echo_step(f"Reconstruction: master strategy is {runtime.master_strategy}")
+    _echo_step(f"Reconstruction: strategy is {runtime.master_strategy}")
     _echo_step(f"Reconstruction: projection strategy is {runtime.projection_strategy}")
 
 
@@ -273,8 +292,15 @@ def _echo_done(message: str) -> None:
     typer.echo(f"OK {message}")
 
 
-def _validate(input_path: Path, rules: Path | None):
+def _validate(input_path: Path, rules: Path | None, *, target: str):
     records = read_json_records(input_path)
+    if target == "check":
+        payloads = [ReconstructionCheckPayload.model_validate(record) for record in records]
+        return ReconstructionCheckValidator().validate_many(payloads)
+    if target != "dpp":
+        raise typer.BadParameter(
+            "Validation/reporting currently supports targets 'check' and 'dpp'."
+        )
     payloads = [CentricProductPayload.model_validate(record) for record in records]
     return _validate_payloads(payloads, rules)
 
@@ -289,3 +315,41 @@ def _validate_payloads(payloads: list[CentricProductPayload], rules: Path | None
     rule_path = resolve_private_config_path(RULES_CONFIG_PATH, rules)
     rule_set = DppRuleSet.from_yaml(rule_path)
     return DppReadinessValidator(rule_set).validate_many(payloads)
+
+
+def _default_reconstruct_output(target: str) -> Path:
+    if target == "check":
+        return DEFAULT_RECONSTRUCTION_CHECK_PATH
+    return DEFAULT_PROJECTED_PRODUCTS_PATH
+
+
+def _default_validate_input(target: str) -> Path:
+    if target == "check":
+        return DEFAULT_RECONSTRUCTION_CHECK_PATH
+    if target == "dpp":
+        return DEFAULT_PROJECTED_PRODUCTS_PATH
+    raise typer.BadParameter("Validation/reporting currently supports targets 'check' and 'dpp'.")
+
+
+def _default_validate_output(target: str) -> Path:
+    if target == "check":
+        return DEFAULT_RECONSTRUCTION_CHECK_RESULTS_PATH
+    if target == "dpp":
+        return DEFAULT_DPP_RESULTS_PATH
+    raise typer.BadParameter("Validation/reporting currently supports targets 'check' and 'dpp'.")
+
+
+def _default_report_output_dir(target: str) -> Path:
+    if target == "check":
+        return DEFAULT_RECONSTRUCTION_CHECK_REPORT_DIR
+    if target == "dpp":
+        return DEFAULT_DPP_REPORT_DIR
+    raise typer.BadParameter("Validation/reporting currently supports targets 'check' and 'dpp'.")
+
+
+def _reporter_for_target(target: str):
+    if target == "check":
+        return ReconstructionCheckReporter()
+    if target == "dpp":
+        return DppReadinessReporter()
+    raise typer.BadParameter("Validation/reporting currently supports targets 'check' and 'dpp'.")

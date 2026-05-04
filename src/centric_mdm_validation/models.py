@@ -18,6 +18,20 @@ class FixLocation(StrEnum):
 
 class ReadinessContext(StrEnum):
     DPP = "dpp"
+    RECONSTRUCTION_CHECK = "reconstruction_check"
+
+
+class ReconstructionCheckPayload(BaseModel):
+    """Compact style relationship state used to check reconstruction coverage."""
+
+    model_config = ConfigDict(extra="allow")
+
+    style_id: str
+    relationship_ids: dict[str, Any] = Field(default_factory=dict)
+    counts: dict[str, Any] = Field(default_factory=dict)
+    applicability: dict[str, Any] = Field(default_factory=dict)
+    unresolved_refs: list[dict[str, Any]] = Field(default_factory=list)
+    warnings: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class CentricVariant(BaseModel):

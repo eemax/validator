@@ -72,7 +72,7 @@ def test_project_master_products_requires_private_projection_for_dpp(
         project_master_products(products, target="dpp", reconstruction_path=None)
 
 
-def test_public_master_reconstruction_is_style_only_placeholder(
+def test_public_reconstruction_projects_compact_check(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -83,12 +83,14 @@ def test_public_master_reconstruction_is_style_only_placeholder(
         {"styles": [{"id": "S1", "node_name": "Fallback Style"}]},
         reconstruction_path=None,
     )
-    payloads = project_master_products(products, target="master", reconstruction_path=None)
+    payloads = project_master_products(products, target="check", reconstruction_path=None)
 
     assert products[0].product_id == "S1"
     assert products[0].graph["placeholder"] is True
-    assert products[0].graph["style"]["node_name"] == "Fallback Style"
-    assert payloads[0]["style"]["id"] == "S1"
+    assert products[0].graph["style_id"] == "S1"
+    assert payloads[0]["style_id"] == "S1"
+    assert payloads[0]["relationship_ids"] == {}
+    assert payloads[0]["counts"]["resolved_records"] == {}
 
 
 def test_inspect_reconstruction_runtime_reports_private_hooks(tmp_path) -> None:
@@ -111,7 +113,7 @@ def project_reconstructed_products(target, reconstructed_products):
     )
 
     assert runtime.path == module_path
-    assert runtime.master_strategy == "private reconstruct_master_products hook"
+    assert runtime.master_strategy == "private reconstruction hook"
     assert runtime.projection_strategy == "private project_reconstructed_products hook"
 
 
@@ -119,11 +121,11 @@ def test_inspect_reconstruction_runtime_reports_public_placeholder(tmp_path, mon
     monkeypatch.delenv("CENTRIC_CONFIG_DIR", raising=False)
     monkeypatch.chdir(tmp_path)
 
-    runtime = inspect_reconstruction_runtime(target="dpp")
+    runtime = inspect_reconstruction_runtime(target="check")
 
     assert runtime.path is None
     assert runtime.master_strategy == "public style-only placeholder"
-    assert runtime.projection_strategy == "private projection required"
+    assert runtime.projection_strategy == "public compact reconstruction check"
 
 
 def test_resolve_reconstruction_path_prefers_explicit_then_config_dir(

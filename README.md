@@ -3,8 +3,8 @@
 Focused validator for Centric product data, starting with DPP readiness.
 
 The project fetches or receives Centric product data, ingests it into a local DuckDB
-reconstruction store, builds a proprietary master reconstruction graph, projects target-specific
-validation payloads, runs governed YAML rules, and creates readiness reports.
+reconstruction store, writes a compact reconstruction check for relationship coverage, projects
+target-specific validation payloads, runs governed rules, and creates readiness reports.
 
 ## Current State
 
@@ -18,6 +18,7 @@ validation payloads, runs governed YAML rules, and creates readiness reports.
 - Centric API fetcher with pagination, retries, checkpoints, resume, delta mode,
   count preflight, ID integrity checks, and structured logs
 - DuckDB-backed ingest/reconstruction path for applying full and delta raw endpoint files
+- Default reconstruction check validation/reporting for missing and unresolved relationships
 
 ## Install
 
@@ -25,10 +26,32 @@ validation payloads, runs governed YAML rules, and creates readiness reports.
 uv sync --dev
 ```
 
-## Validate Example Payloads
+## Default Reconstruction Check
+
+The no-argument command path is the reconstruction check. It is a compact status artifact for
+debugging relationship coverage, not a product payload:
+
+```bash
+uv run centric-mdm reconstruct
+uv run centric-mdm validate
+uv run centric-mdm report
+```
+
+Defaults:
+
+- `reconstruct` writes `data/results/reconstruction-check.jsonl`
+- `validate` reads that file and writes `data/results/reconstruction-check-results.json`
+- `report` reads that file and writes `reports/reconstruction-check/`
+
+Each check row is one style with relationship IDs, relationship/resolved-record counts,
+applicability mappings, unresolved refs, and reconstruction warnings. Full endpoint records stay
+in DuckDB instead of being duplicated into the JSONL output.
+
+## Validate DPP Payloads
 
 ```bash
 uv run centric-mdm validate \
+  --target dpp \
   --input tests/fixtures/projected-products.json \
   --rules .local/rules/dpp-readiness.yml \
   --output data/results/dpp-readiness-results.json
@@ -60,15 +83,16 @@ uv run centric-mdm ingest \
   --db data/centric.duckdb
 ```
 
-Build the master reconstruction graph and write it to JSONL for inspection:
+Build the compact reconstruction check from the current DuckDB state:
 
 ```bash
 uv run centric-mdm reconstruct \
   --db data/centric.duckdb \
-  --output data/results/master-products.jsonl
+  --output data/results/reconstruction-check.jsonl
 ```
 
-Use `--target dpp` later when the private DPP projection has been implemented.
+Use explicit targets such as `--target dpp`, `--target packaging`, or
+`--target erp-item-master` for private target-specific projections.
 
 Or run ingest, reconstruct, and validation together:
 
@@ -96,8 +120,8 @@ schema. These views are the intended boundary for letting DuckDB handle set-base
 joins, and affected-product discovery while private Python reconstruction handles proprietary
 product semantics.
 
-The detailed master reconstruction and target projections are proprietary. They should live
-outside the public repo and be resolved from `CENTRIC_CONFIG_DIR/reconstruction.py` or
+The detailed reconstruction and target projections are proprietary. They should live outside the
+public repo and be resolved from `CENTRIC_CONFIG_DIR/reconstruction.py` or
 `.local/reconstruction.py`. The private hooks are:
 
 ```python
@@ -109,15 +133,17 @@ def project_reconstructed_products(target, reconstructed_products):
     ...
 ```
 
-`reconstruct` writes the master graph into DuckDB tables such as `reconstructed_products`,
-`reconstruction_source_refs`, and `reconstruction_warnings`, then projects that graph into the
-requested target contract. The public fallback only builds a style-only placeholder master graph.
-All target projections, including `dpp`, require a private `project_reconstructed_products` hook.
+`reconstruct` writes compact reconstruction state into DuckDB tables such as
+`reconstructed_products`, `reconstruction_source_refs`, and `reconstruction_warnings`, then
+materializes either the default `check` output or the requested private target contract. The public
+fallback only builds a style-only placeholder check. All target projections other than `check`,
+including `dpp`, require a private `project_reconstructed_products` hook.
 
 ## Create DPP Reports
 
 ```bash
 uv run centric-mdm report \
+  --target dpp \
   --input tests/fixtures/projected-products.json \
   --rules .local/rules/dpp-readiness.yml \
   --output-dir reports/dpp-readiness
