@@ -6,11 +6,14 @@ from centric_mdm_validation.centric.schema import EndpointSchema, load_endpoint_
 from centric_mdm_validation.centric.store import (
     ingest_raw_dir,
     load_current_endpoint_records,
-    reconstruct_products,
+    rebuild_master_reconstruction,
 )
 
 
-def test_ingest_raw_dir_seeds_store_and_reconstructs_products(tmp_path) -> None:
+def test_ingest_raw_dir_seeds_store_and_reconstructs_master(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("CENTRIC_CONFIG_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
     _write_jsonl(
@@ -42,13 +45,12 @@ def test_ingest_raw_dir_seeds_store_and_reconstructs_products(tmp_path) -> None:
     db_path = tmp_path / "centric.duckdb"
 
     result = ingest_raw_dir(raw_dir, db_path, schemas=load_endpoint_schemas())
-    payloads = reconstruct_products(db_path)
+    master_result = rebuild_master_reconstruction(db_path)
 
     assert result.applied_files == 2
     assert result.records_upserted == 2
-    assert payloads[0].centric_style_id == "S1"
-    assert payloads[0].style_name == "Seed Jacket"
-    assert payloads[0].variants[0].global_variant_id == "variant-global-1"
+    assert master_result.products_reconstructed == 1
+    assert master_result.source_refs == 1
 
 
 def test_ingest_raw_dir_applies_delta_once_and_keeps_newest_record(tmp_path) -> None:
@@ -84,12 +86,13 @@ def test_ingest_raw_dir_applies_delta_once_and_keeps_newest_record(tmp_path) -> 
 
     first = ingest_raw_dir(raw_dir, db_path, schemas=load_endpoint_schemas())
     second = ingest_raw_dir(raw_dir, db_path, schemas=load_endpoint_schemas())
-    payloads = reconstruct_products(db_path)
 
     assert first.applied_files == 2
     assert second.applied_files == 0
     assert second.skipped_files == 2
-    assert payloads[0].style_name == "Updated Jacket"
+    with duckdb.connect(str(db_path)) as conn:
+        records = load_current_endpoint_records(conn)
+    assert records["styles"][0]["node_name"] == "Updated Jacket"
 
 
 def test_ingest_raw_dir_dedupes_records_within_file_by_modified_at(tmp_path) -> None:
@@ -117,10 +120,11 @@ def test_ingest_raw_dir_dedupes_records_within_file_by_modified_at(tmp_path) -> 
     db_path = tmp_path / "centric.duckdb"
 
     result = ingest_raw_dir(raw_dir, db_path, schemas=load_endpoint_schemas())
-    payloads = reconstruct_products(db_path)
+    with duckdb.connect(str(db_path)) as conn:
+        records = load_current_endpoint_records(conn)
 
     assert result.records_upserted == 1
-    assert payloads[0].style_name == "Newer Style"
+    assert records["styles"][0]["node_name"] == "Newer Style"
 
 
 def test_ingest_raw_dir_stores_typed_timestamps_and_current_views(tmp_path) -> None:
@@ -156,7 +160,10 @@ def test_ingest_raw_dir_stores_typed_timestamps_and_current_views(tmp_path) -> N
     assert row[3] is not None
 
 
-def test_ingest_raw_dir_applies_active_false_as_delete(tmp_path) -> None:
+def test_ingest_raw_dir_applies_active_false_as_delete(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("CENTRIC_CONFIG_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
     _write_jsonl(
@@ -180,10 +187,10 @@ def test_ingest_raw_dir_applies_active_false_as_delete(tmp_path) -> None:
     db_path = tmp_path / "centric.duckdb"
 
     result = ingest_raw_dir(raw_dir, db_path, schemas=load_endpoint_schemas())
-    payloads = reconstruct_products(db_path)
+    master_result = rebuild_master_reconstruction(db_path)
 
     assert result.records_deleted == 1
-    assert payloads == []
+    assert master_result.products_reconstructed == 0
 
 
 def test_ingest_raw_dir_rejects_unimplemented_full_snapshot_mode(tmp_path) -> None:
@@ -220,7 +227,10 @@ def test_load_current_endpoint_records_returns_endpoint_groups(tmp_path) -> None
     assert records == {"materials": [{"id": "M1", "node_name": "Cotton"}]}
 
 
-def test_reconstruct_products_writes_master_reconstruction_tables(tmp_path) -> None:
+def test_rebuild_master_reconstruction_writes_master_tables(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("CENTRIC_CONFIG_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
     _write_jsonl(
@@ -230,7 +240,7 @@ def test_reconstruct_products_writes_master_reconstruction_tables(tmp_path) -> N
     db_path = tmp_path / "centric.duckdb"
     ingest_raw_dir(raw_dir, db_path, schemas=load_endpoint_schemas())
 
-    payloads = reconstruct_products(db_path)
+    result = rebuild_master_reconstruction(db_path)
 
     with duckdb.connect(str(db_path)) as conn:
         product_row = conn.execute(
@@ -248,7 +258,7 @@ def test_reconstruct_products_writes_master_reconstruction_tables(tmp_path) -> N
             """
         ).fetchone()[0]
 
-    assert payloads[0].centric_style_id == "S1"
+    assert result.products_reconstructed == 1
     assert product_row[0] == "S1"
     assert product_row[1] == "BR"
     assert product_row[2] is not None

@@ -5,7 +5,7 @@ import typer
 
 from centric_mdm_validation.centric.cli import main as fetcher_main
 from centric_mdm_validation.centric.config import resolve_private_config_path
-from centric_mdm_validation.centric.mapper import load_projection_mapping, write_projected_products
+from centric_mdm_validation.centric.reconstruction import inspect_reconstruction_runtime
 from centric_mdm_validation.centric.schema import load_endpoint_schemas
 from centric_mdm_validation.centric.store import (
     IngestFileProgress,
@@ -48,33 +48,6 @@ def fetch(ctx: typer.Context) -> None:
 
 
 @app.command()
-def project(
-    input_dir: Annotated[
-        Path,
-        typer.Option(
-            "--input-dir",
-            "-i",
-            help="Directory containing fetched endpoint JSONL files.",
-        ),
-    ] = Path("data/raw"),
-    output: Annotated[
-        Path,
-        typer.Option("--output", "-o", help="Projected product JSONL."),
-    ] = DEFAULT_PROJECTED_PRODUCTS_PATH,
-    mapping: Annotated[
-        Path | None,
-        typer.Option("--mapping", "-m", help="Optional local projection field mapping YAML."),
-    ] = None,
-) -> None:
-    """Project fetched Centric endpoint payloads into validator product payloads."""
-
-    _echo_step(f"Project: reading endpoint payloads from {input_dir}")
-    _echo_step(f"Project: writing validator payloads to {output}")
-    payloads = write_projected_products(input_dir, output, mapping)
-    _echo_done(f"Projected {len(payloads)} products from {input_dir} into {output}")
-
-
-@app.command()
 def ingest(
     raw_dir: Annotated[
         Path,
@@ -113,15 +86,12 @@ def reconstruct(
         str,
         typer.Option("--target", "-t", help="Projection target to materialize from master state."),
     ] = "dpp",
-    mapping: Annotated[
-        Path | None,
-        typer.Option("--mapping", "-m", help="Optional local projection field mapping YAML."),
-    ] = None,
 ) -> None:
     """Build master reconstruction state and materialize a target projection."""
 
+    _echo_reconstruction_runtime(target)
     _echo_step(f"Reconstruct: building master product graph from {db}")
-    master_result = rebuild_master_reconstruction(db, mapping=load_projection_mapping(mapping))
+    master_result = rebuild_master_reconstruction(db)
     _echo_done(
         f"Master reconstruction stored {master_result.products_reconstructed} products "
         f"({master_result.source_refs} source refs, {master_result.warnings} warnings)"
@@ -131,7 +101,6 @@ def reconstruct(
         db,
         output,
         target=target,
-        mapping=load_projection_mapping(mapping),
     )
     _echo_done(f"Projected {len(payloads)} {target} payloads from master reconstruction")
 
@@ -158,10 +127,6 @@ def pipeline(
         Path | None,
         typer.Option("--schema", help="Endpoint merge schema YAML."),
     ] = None,
-    mapping: Annotated[
-        Path | None,
-        typer.Option("--mapping", "-m", help="Optional local projection field mapping YAML."),
-    ] = None,
     rules: RulesOption = None,
     validation_output: Annotated[
         Path,
@@ -178,15 +143,15 @@ def pipeline(
     ingest_result = _run_ingest(raw_dir=raw_dir, db=db, schema=schema)
     if target != "dpp":
         raise typer.BadParameter("Pipeline validation/reporting currently supports target 'dpp'.")
+    _echo_reconstruction_runtime(target)
     _echo_step("Pipeline: building master reconstruction")
-    master_result = rebuild_master_reconstruction(db, mapping=load_projection_mapping(mapping))
+    master_result = rebuild_master_reconstruction(db)
     _echo_done(f"Master reconstruction stored {master_result.products_reconstructed} products")
     _echo_step(f"Pipeline: projecting {target} payloads")
     projected_payloads = write_projected_products_from_master(
         db,
         projected_output,
         target=target,
-        mapping=load_projection_mapping(mapping),
     )
     payloads = [_coerce_dpp_payload(payload) for payload in projected_payloads]
     _echo_done(f"Projected {len(payloads)} products into {projected_output}")
@@ -287,6 +252,16 @@ def _echo_ingest_progress(event: IngestFileProgress) -> None:
             f"{event.records_read} records, {event.records_upserted} upserts, "
             f"{event.records_deleted} deletes"
         )
+
+
+def _echo_reconstruction_runtime(target: str) -> None:
+    runtime = inspect_reconstruction_runtime(target=target)
+    if runtime.path is None:
+        _echo_step("Reconstruction: using public fallback module")
+    else:
+        _echo_step(f"Reconstruction: using private module {runtime.path}")
+    _echo_step(f"Reconstruction: master strategy is {runtime.master_strategy}")
+    _echo_step(f"Reconstruction: projection strategy is {runtime.projection_strategy}")
 
 
 def _echo_step(message: str) -> None:

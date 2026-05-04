@@ -2,10 +2,9 @@
 
 Focused validator for Centric product data, starting with DPP readiness.
 
-The project fetches or receives Centric product data, projects it into a narrow validation
-payload, runs governed YAML rules, and creates readiness reports by brand/product. Continuous
-delta fetches are ingested into a local DuckDB reconstruction store before validation payloads are
-materialized.
+The project fetches or receives Centric product data, ingests it into a local DuckDB
+reconstruction store, builds a proprietary master reconstruction graph, projects target-specific
+validation payloads, runs governed YAML rules, and creates readiness reports.
 
 ## Current State
 
@@ -34,17 +33,6 @@ uv run centric-mdm validate \
   --rules .local/rules/dpp-readiness.yml \
   --output data/results/dpp-readiness-results.json
 ```
-
-## Project Fetched Centric Data
-
-```bash
-uv run centric-mdm project \
-  --input-dir data/raw \
-  --output data/results/projected-products.jsonl
-```
-
-This legacy command projects directly from endpoint files in one directory. For continuous delta
-workflows, prefer the reconstruction store commands below.
 
 ## Ingest And Reconstruct
 
@@ -108,33 +96,23 @@ schema. These views are the intended boundary for letting DuckDB handle set-base
 joins, and affected-product discovery while private Python reconstruction handles proprietary
 product semantics.
 
-The detailed master reconstruction and target projections are expected to be proprietary. They
-should live outside the public repo and be resolved from `CENTRIC_CONFIG_DIR/reconstruction.py` or
-`.local/reconstruction.py`. The preferred private hooks are:
+The detailed master reconstruction and target projections are proprietary. They should live
+outside the public repo and be resolved from `CENTRIC_CONFIG_DIR/reconstruction.py` or
+`.local/reconstruction.py`. The private hooks are:
 
 ```python
-def reconstruct_master_products(records_by_endpoint, *, mapping=None):
+def reconstruct_master_products(records_by_endpoint):
     ...
 
 
-def project_reconstructed_products(target, reconstructed_products, *, mapping=None):
+def project_reconstructed_products(target, reconstructed_products):
     ...
 ```
 
 `reconstruct` writes the master graph into DuckDB tables such as `reconstructed_products`,
 `reconstruction_source_refs`, and `reconstruction_warnings`, then projects that graph into the
-requested target contract. For compatibility, an existing private
-`reconstruct_projected_products(records_by_endpoint, *, mapping=None)` hook is still accepted as
-the DPP fallback, but new target formats such as packaging or ERP item master validation should be
-implemented as projections from the master reconstruction graph.
-
-Company-specific Centric attribute names live outside the public repo. Put private config under
-`CENTRIC_CONFIG_DIR`, or use `.local/` for repo-adjacent local work. `.local/` is gitignored.
-The project looks for projection mappings in this order:
-
-1. `--mapping /path/to/private/field-mapping.yml`
-2. `CENTRIC_CONFIG_DIR/field-mapping.yml`
-3. `.local/field-mapping.yml`
+requested target contract. The public fallback only builds a style-only placeholder master graph.
+All target projections, including `dpp`, require a private `project_reconstructed_products` hook.
 
 ## Create DPP Reports
 

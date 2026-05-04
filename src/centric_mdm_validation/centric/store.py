@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
+import os
+import tempfile
 from collections import defaultdict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -11,7 +14,6 @@ from typing import Any
 
 import duckdb
 
-from centric_mdm_validation.centric.mapper import ProjectionMapping
 from centric_mdm_validation.centric.reconstruction import (
     DEFAULT_PROJECTION_TARGET,
     ReconstructedProduct,
@@ -22,7 +24,6 @@ from centric_mdm_validation.centric.reconstruction import (
 )
 from centric_mdm_validation.centric.schema import EndpointSchema
 from centric_mdm_validation.io import write_jsonl
-from centric_mdm_validation.models import CentricProductPayload
 
 
 @dataclass(frozen=True)
@@ -216,31 +217,13 @@ def _emit_ingest_progress(
     )
 
 
-def write_reconstructed_products(
-    db_path: Path,
-    output_path: Path,
-    *,
-    mapping: ProjectionMapping | None = None,
-    target: str = DEFAULT_PROJECTION_TARGET,
-) -> list[Any]:
-    rebuild_master_reconstruction(db_path, mapping=mapping)
-    payloads = write_projected_products_from_master(
-        db_path,
-        output_path,
-        target=target,
-        mapping=mapping,
-    )
-    return payloads
-
-
 def write_projected_products_from_master(
     db_path: Path,
     output_path: Path,
     *,
     target: str = DEFAULT_PROJECTION_TARGET,
-    mapping: ProjectionMapping | None = None,
 ) -> list[Any]:
-    payloads = project_products_from_master(db_path, target=target, mapping=mapping)
+    payloads = project_products_from_master(db_path, target=target)
     write_jsonl(
         output_path,
         (_payload_to_json_record(payload) for payload in payloads),
@@ -248,31 +231,12 @@ def write_projected_products_from_master(
     return payloads
 
 
-def reconstruct_products(
-    db_path: Path,
-    *,
-    mapping: ProjectionMapping | None = None,
-) -> list[CentricProductPayload]:
-    rebuild_master_reconstruction(db_path, mapping=mapping)
-    payloads = project_products_from_master(
-        db_path,
-        target=DEFAULT_PROJECTION_TARGET,
-        mapping=mapping,
-    )
-    return [
-        CentricProductPayload.model_validate(_payload_to_json_record(payload))
-        for payload in payloads
-    ]
-
-
 def rebuild_master_reconstruction(
     db_path: Path,
-    *,
-    mapping: ProjectionMapping | None = None,
 ) -> MasterReconstructionResult:
     with duckdb.connect(str(db_path)) as conn:
         records_by_endpoint = load_current_endpoint_records(conn)
-        products = reconstruct_master_products_from_records(records_by_endpoint, mapping=mapping)
+        products = reconstruct_master_products_from_records(records_by_endpoint)
         write_master_reconstruction(conn, products)
     return MasterReconstructionResult(
         products_reconstructed=len(products),
@@ -285,12 +249,11 @@ def project_products_from_master(
     db_path: Path,
     *,
     target: str = DEFAULT_PROJECTION_TARGET,
-    mapping: ProjectionMapping | None = None,
 ) -> list[Any]:
     with duckdb.connect(str(db_path)) as conn:
         initialize_store(conn)
         products = load_master_reconstruction(conn)
-    return project_master_products(products, target=target, mapping=mapping)
+    return project_master_products(products, target=target)
 
 
 def write_master_reconstruction(
@@ -321,7 +284,11 @@ def write_master_reconstruction(
                 product.brand_code,
                 product.season,
                 product.product_type_code,
-                json.dumps(product.graph, default=str, separators=(",", ":")),
+                json.dumps(
+                    _compact_master_graph(product.graph),
+                    default=str,
+                    separators=(",", ":"),
+                ),
                 len(product.warnings),
                 reconstructed_at,
                 reconstructed_at,
@@ -341,15 +308,7 @@ def write_master_reconstruction(
         for source_ref in product.source_refs
     ]
     if source_rows:
-        conn.executemany(
-            """
-            INSERT INTO reconstruction_source_refs (
-                product_id, source_endpoint, source_record_id, relation_type
-            )
-            VALUES (?, ?, ?, ?)
-            """,
-            source_rows,
-        )
+        _copy_reconstruction_source_refs(conn, source_rows)
 
     warning_rows = [
         [
@@ -388,6 +347,7 @@ def load_master_reconstruction(
     ).fetchall()
     source_refs = _load_reconstruction_source_refs(conn)
     warnings = _load_reconstruction_warnings(conn)
+    relation_records = _load_master_relation_records(conn)
     return [
         ReconstructedProduct(
             product_id=str(product_id),
@@ -395,7 +355,10 @@ def load_master_reconstruction(
             brand_code=brand_code,
             season=season,
             product_type_code=product_type_code,
-            graph=json.loads(graph_json),
+            graph=_hydrate_master_graph(
+                json.loads(graph_json),
+                relation_records.get(str(product_id), {}),
+            ),
             source_refs=tuple(source_refs.get(str(product_id), [])),
             warnings=tuple(warnings.get(str(product_id), [])),
         )
@@ -627,6 +590,111 @@ def _load_reconstruction_source_refs(
             )
         )
     return refs
+
+
+def _copy_reconstruction_source_refs(
+    conn: duckdb.DuckDBPyConnection,
+    rows: list[list[str | None]],
+) -> None:
+    csv_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            newline="",
+            encoding="utf-8",
+            suffix=".csv",
+            delete=False,
+        ) as csv_file:
+            csv_path = csv_file.name
+            csv.writer(csv_file).writerows(rows)
+        conn.execute(
+            """
+            COPY reconstruction_source_refs
+            FROM ?
+            (DELIMITER ',', HEADER false, NULL '')
+            """,
+            [csv_path],
+        )
+    finally:
+        if csv_path is not None:
+            os.unlink(csv_path)
+
+
+_MASTER_RECORD_BUCKETS = {
+    "style",
+    "seasons",
+    "colorways",
+    "sizes",
+    "boms",
+    "bom_rows",
+    "materials",
+    "supplier_quotes",
+    "factories",
+    "suppliers",
+}
+
+_RELATION_GRAPH_BUCKETS = {
+    "style": "style",
+    "season": "seasons",
+    "colorway": "colorways",
+    "size": "sizes",
+    "bom": "boms",
+    "bom_row": "bom_rows",
+    "material": "materials",
+    "supplier_quote": "supplier_quotes",
+    "factory": "factories",
+    "supplier": "suppliers",
+}
+
+
+def _compact_master_graph(graph: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in graph.items()
+        if key not in _MASTER_RECORD_BUCKETS
+    }
+
+
+def _hydrate_master_graph(
+    graph: dict[str, Any],
+    relation_records: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    hydrated = dict(graph)
+    hydrated.setdefault("style", None)
+    for bucket in _MASTER_RECORD_BUCKETS - {"style"}:
+        hydrated.setdefault(bucket, [])
+    for relation_type, records in relation_records.items():
+        bucket = _RELATION_GRAPH_BUCKETS.get(relation_type)
+        if bucket is None:
+            continue
+        if bucket == "style":
+            hydrated["style"] = records[0] if records else None
+        else:
+            hydrated[bucket] = records
+    return hydrated
+
+
+def _load_master_relation_records(
+    conn: duckdb.DuckDBPyConnection,
+) -> dict[str, dict[str, list[dict[str, Any]]]]:
+    rows = conn.execute(
+        """
+        SELECT refs.product_id, refs.relation_type, records.payload
+        FROM reconstruction_source_refs refs
+        JOIN endpoint_records records
+          ON records.endpoint = refs.source_endpoint
+         AND records.record_id = refs.source_record_id
+        ORDER BY refs.product_id, refs.relation_type, refs.source_record_id
+        """
+    ).fetchall()
+    products: defaultdict[str, defaultdict[str, list[dict[str, Any]]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    for product_id, relation_type, payload in rows:
+        if relation_type is None:
+            continue
+        products[str(product_id)][str(relation_type)].append(json.loads(payload))
+    return {product_id: dict(relations) for product_id, relations in products.items()}
 
 
 def _load_reconstruction_warnings(

@@ -36,7 +36,7 @@ class CentricProductPayload(BaseModel):
     """Normalized product/style payload used by validators.
 
     Raw Centric shapes are expected to be projected into this model before rules run.
-    Keeping this contract small makes it easier to swap the mapper once real payloads land.
+    Keeping this contract small makes target-specific projections easier to govern.
     """
 
     model_config = ConfigDict(extra="allow")

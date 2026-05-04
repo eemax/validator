@@ -9,8 +9,6 @@ from typing import Any, Protocol
 from pydantic import BaseModel
 
 from centric_mdm_validation.centric.config import resolve_optional_private_config_path
-from centric_mdm_validation.centric.mapper import ProjectionMapping, project_products
-from centric_mdm_validation.models import CentricProductPayload
 
 RECONSTRUCTION_CONFIG_PATH = Path("reconstruction.py")
 DEFAULT_PROJECTION_TARGET = "dpp"
@@ -44,21 +42,17 @@ class ReconstructedProduct:
     warnings: tuple[ReconstructionWarning, ...] = ()
 
 
-class ReconstructionFunction(Protocol):
-    def __call__(
-        self,
-        records_by_endpoint: Mapping[str, Iterable[dict[str, Any]]],
-        *,
-        mapping: ProjectionMapping | None = None,
-    ) -> list[CentricProductPayload]: ...
+@dataclass(frozen=True)
+class ReconstructionRuntimeInfo:
+    path: Path | None
+    master_strategy: str
+    projection_strategy: str
 
 
 class MasterReconstructionFunction(Protocol):
     def __call__(
         self,
         records_by_endpoint: Mapping[str, Iterable[dict[str, Any]]],
-        *,
-        mapping: ProjectionMapping | None = None,
     ) -> Iterable[ReconstructedProduct | Mapping[str, Any]]: ...
 
 
@@ -67,15 +61,12 @@ class ProjectionFunction(Protocol):
         self,
         target: str,
         reconstructed_products: Iterable[ReconstructedProduct],
-        *,
-        mapping: ProjectionMapping | None = None,
     ) -> Iterable[BaseModel | Mapping[str, Any]]: ...
 
 
 def reconstruct_master_products_from_records(
     records_by_endpoint: Mapping[str, Iterable[dict[str, Any]]],
     *,
-    mapping: ProjectionMapping | None = None,
     reconstruction_path: Path | None = None,
 ) -> list[ReconstructedProduct]:
     """Build the target-agnostic master reconstruction graph."""
@@ -86,89 +77,76 @@ def reconstruct_master_products_from_records(
         if callable(reconstruction):
             return [
                 _coerce_reconstructed_product(product)
-                for product in reconstruction(records_by_endpoint, mapping=mapping)
+                for product in reconstruction(records_by_endpoint)
             ]
+        raise ValueError(
+            "Private reconstruction module must define "
+            "reconstruct_master_products(records_by_endpoint)."
+        )
 
-        legacy_reconstruction = getattr(module, "reconstruct_projected_products", None)
-        if callable(legacy_reconstruction):
-            return [
-                _master_product_from_dpp_payload(payload)
-                for payload in legacy_reconstruction(records_by_endpoint, mapping=mapping)
-            ]
+    return _placeholder_master_products(records_by_endpoint)
 
-    return [
-        _master_product_from_dpp_payload(payload)
-        for payload in project_products(records_by_endpoint, mapping=mapping)
-    ]
+
+def inspect_reconstruction_runtime(
+    *,
+    target: str = DEFAULT_PROJECTION_TARGET,
+    reconstruction_path: Path | None = None,
+) -> ReconstructionRuntimeInfo:
+    """Describe which reconstruction/projection implementation will be used."""
+
+    path = resolve_reconstruction_path(reconstruction_path)
+    if path is None:
+        return ReconstructionRuntimeInfo(
+            path=None,
+            master_strategy="public style-only placeholder",
+            projection_strategy=_default_projection_strategy(target),
+        )
+
+    module = load_private_reconstruction_module(path)
+    has_master_hook = callable(getattr(module, "reconstruct_master_products", None))
+    has_projection_hook = callable(getattr(module, "project_reconstructed_products", None))
+
+    return ReconstructionRuntimeInfo(
+        path=path,
+        master_strategy=(
+            "private reconstruct_master_products hook"
+            if has_master_hook
+            else "missing private reconstruct_master_products hook"
+        ),
+        projection_strategy=(
+            "private project_reconstructed_products hook"
+            if has_projection_hook
+            else _default_projection_strategy(target)
+        ),
+    )
 
 
 def project_master_products(
     reconstructed_products: Iterable[ReconstructedProduct],
     *,
     target: str = DEFAULT_PROJECTION_TARGET,
-    mapping: ProjectionMapping | None = None,
     reconstruction_path: Path | None = None,
 ) -> list[BaseModel | dict[str, Any]]:
     """Project master reconstruction output into a target-specific payload contract."""
 
     products = list(reconstructed_products)
+    if target in {"master", "debug"}:
+        return [product.graph for product in products]
+
     module = load_private_reconstruction_module(reconstruction_path)
     if module is not None:
         projection = getattr(module, "project_reconstructed_products", None)
         if callable(projection):
             return [
                 _coerce_projected_payload(payload)
-                for payload in projection(target, products, mapping=mapping)
+                for payload in projection(target, products)
             ]
 
-    if target != DEFAULT_PROJECTION_TARGET:
-        raise ValueError(
-            f"No projection configured for target {target!r}. Define "
-            "project_reconstructed_products(target, reconstructed_products, *, mapping=None) "
-            f"in {RECONSTRUCTION_CONFIG_PATH}."
-        )
-
-    return [
-        CentricProductPayload.model_validate(product.graph)
-        for product in products
-        if product.graph
-    ]
-
-
-def reconstruct_products_from_records(
-    records_by_endpoint: Mapping[str, Iterable[dict[str, Any]]],
-    *,
-    mapping: ProjectionMapping | None = None,
-    reconstruction_path: Path | None = None,
-) -> list[CentricProductPayload]:
-    """Project endpoint snapshots, using private reconstruction logic when configured."""
-
-    products = reconstruct_master_products_from_records(
-        records_by_endpoint,
-        mapping=mapping,
-        reconstruction_path=reconstruction_path,
+    raise ValueError(
+        f"Private projection required for target {target!r}. Define "
+        "project_reconstructed_products(target, reconstructed_products) "
+        f"in {RECONSTRUCTION_CONFIG_PATH}."
     )
-    payloads = project_master_products(
-        products,
-        target=DEFAULT_PROJECTION_TARGET,
-        mapping=mapping,
-        reconstruction_path=reconstruction_path,
-    )
-    return [CentricProductPayload.model_validate(_payload_to_dict(payload)) for payload in payloads]
-
-
-def load_private_reconstruction(path: Path | None = None) -> ReconstructionFunction | None:
-    module = load_private_reconstruction_module(path)
-    if module is None:
-        return None
-
-    function = getattr(module, "reconstruct_projected_products", None)
-    if not callable(function):
-        raise ValueError(
-            "Private reconstruction module must define reconstruct_projected_products("
-            "records_by_endpoint, *, mapping=None)."
-        )
-    return function
 
 
 def load_private_reconstruction_module(path: Path | None = None) -> Any | None:
@@ -192,26 +170,43 @@ def resolve_reconstruction_path(path: Path | None = None) -> Path | None:
     return resolve_optional_private_config_path(RECONSTRUCTION_CONFIG_PATH)
 
 
-def _master_product_from_dpp_payload(
-    payload: CentricProductPayload | Mapping[str, Any],
-) -> ReconstructedProduct:
-    product = CentricProductPayload.model_validate(_payload_to_dict(payload))
-    graph = product.model_dump(mode="json", exclude_none=True)
-    return ReconstructedProduct(
-        product_id=product.centric_style_id,
-        style_id=product.centric_style_id,
-        brand_code=product.brand_code,
-        season=product.season,
-        product_type_code=product.product_type_code,
-        graph=graph,
-        source_refs=(
-            ReconstructionSourceRef(
-                endpoint="styles",
-                record_id=product.centric_style_id,
-                relation_type="style",
-            ),
-        ),
-    )
+def _placeholder_master_products(
+    records_by_endpoint: Mapping[str, Iterable[dict[str, Any]]],
+) -> list[ReconstructedProduct]:
+    products: list[ReconstructedProduct] = []
+    for style in records_by_endpoint.get("styles", []):
+        if not isinstance(style, dict):
+            continue
+        style_id = _optional_string(style.get("id"))
+        if style_id is None:
+            continue
+        products.append(
+            ReconstructedProduct(
+                product_id=style_id,
+                style_id=style_id,
+                brand_code=_optional_string(style.get("brand_code")),
+                product_type_code=_optional_string(style.get("product_type")),
+                graph={
+                    "product_id": style_id,
+                    "style": style,
+                    "placeholder": True,
+                },
+                source_refs=(
+                    ReconstructionSourceRef(
+                        endpoint="styles",
+                        record_id=style_id,
+                        relation_type="style",
+                    ),
+                ),
+            )
+        )
+    return products
+
+
+def _default_projection_strategy(target: str) -> str:
+    if target in {"master", "debug"}:
+        return "public master graph output"
+    return "private projection required"
 
 
 def _coerce_reconstructed_product(
@@ -279,12 +274,6 @@ def _coerce_projected_payload(payload: BaseModel | Mapping[str, Any]) -> BaseMod
     if isinstance(payload, Mapping):
         return dict(payload)
     raise TypeError("Projected payloads must be Pydantic models or mappings.")
-
-
-def _payload_to_dict(payload: BaseModel | Mapping[str, Any]) -> dict[str, Any]:
-    if isinstance(payload, BaseModel):
-        return payload.model_dump(mode="json", exclude_none=True)
-    return dict(payload)
 
 
 def _optional_string(value: Any) -> str | None:

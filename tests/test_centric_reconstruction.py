@@ -1,34 +1,18 @@
+import pytest
+
 from centric_mdm_validation.centric.reconstruction import (
+    inspect_reconstruction_runtime,
     project_master_products,
     reconstruct_master_products_from_records,
-    reconstruct_products_from_records,
     resolve_reconstruction_path,
 )
-
-
-def test_reconstruct_products_from_records_uses_private_module(tmp_path) -> None:
-    module_path = tmp_path / "reconstruction.py"
-    module_path.write_text(
-        """
-from centric_mdm_validation.models import CentricProductPayload
-
-
-def reconstruct_projected_products(records_by_endpoint, *, mapping=None):
-    return [CentricProductPayload(centric_style_id="PRIVATE-1")]
-""",
-        encoding="utf-8",
-    )
-
-    payloads = reconstruct_products_from_records({}, reconstruction_path=module_path)
-
-    assert payloads[0].centric_style_id == "PRIVATE-1"
 
 
 def test_master_reconstruction_and_projection_use_private_hooks(tmp_path) -> None:
     module_path = tmp_path / "reconstruction.py"
     module_path.write_text(
         """
-def reconstruct_master_products(records_by_endpoint, *, mapping=None):
+def reconstruct_master_products(records_by_endpoint):
     return [
         {
             "product_id": "MASTER-1",
@@ -48,7 +32,7 @@ def reconstruct_master_products(records_by_endpoint, *, mapping=None):
     ]
 
 
-def project_reconstructed_products(target, reconstructed_products, *, mapping=None):
+def project_reconstructed_products(target, reconstructed_products):
     return [
         {
             "centric_style_id": product.product_id,
@@ -72,20 +56,74 @@ def project_reconstructed_products(target, reconstructed_products, *, mapping=No
     assert payloads[0]["style_name"] == "dpp: BR"
 
 
-def test_reconstruct_products_from_records_falls_back_to_public_mapper(
+def test_project_master_products_requires_private_projection_for_dpp(
     tmp_path,
     monkeypatch,
 ) -> None:
     monkeypatch.delenv("CENTRIC_CONFIG_DIR", raising=False)
     monkeypatch.chdir(tmp_path)
 
-    payloads = reconstruct_products_from_records(
+    products = reconstruct_master_products_from_records(
         {"styles": [{"id": "S1", "node_name": "Fallback Style"}]},
         reconstruction_path=None,
     )
 
-    assert payloads[0].centric_style_id == "S1"
-    assert payloads[0].style_name == "Fallback Style"
+    with pytest.raises(ValueError, match="Private projection required for target 'dpp'"):
+        project_master_products(products, target="dpp", reconstruction_path=None)
+
+
+def test_public_master_reconstruction_is_style_only_placeholder(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("CENTRIC_CONFIG_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    products = reconstruct_master_products_from_records(
+        {"styles": [{"id": "S1", "node_name": "Fallback Style"}]},
+        reconstruction_path=None,
+    )
+    payloads = project_master_products(products, target="master", reconstruction_path=None)
+
+    assert products[0].product_id == "S1"
+    assert products[0].graph["placeholder"] is True
+    assert products[0].graph["style"]["node_name"] == "Fallback Style"
+    assert payloads[0]["style"]["id"] == "S1"
+
+
+def test_inspect_reconstruction_runtime_reports_private_hooks(tmp_path) -> None:
+    module_path = tmp_path / "reconstruction.py"
+    module_path.write_text(
+        """
+def reconstruct_master_products(records_by_endpoint):
+    return []
+
+
+def project_reconstructed_products(target, reconstructed_products):
+    return []
+""",
+        encoding="utf-8",
+    )
+
+    runtime = inspect_reconstruction_runtime(
+        target="packaging",
+        reconstruction_path=module_path,
+    )
+
+    assert runtime.path == module_path
+    assert runtime.master_strategy == "private reconstruct_master_products hook"
+    assert runtime.projection_strategy == "private project_reconstructed_products hook"
+
+
+def test_inspect_reconstruction_runtime_reports_public_placeholder(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("CENTRIC_CONFIG_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    runtime = inspect_reconstruction_runtime(target="dpp")
+
+    assert runtime.path is None
+    assert runtime.master_strategy == "public style-only placeholder"
+    assert runtime.projection_strategy == "private projection required"
 
 
 def test_resolve_reconstruction_path_prefers_explicit_then_config_dir(
