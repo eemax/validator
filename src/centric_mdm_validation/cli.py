@@ -34,6 +34,7 @@ RulesOption = Annotated[
 ]
 RULES_CONFIG_PATH = Path("rules/dpp-readiness.yml")
 DEFAULT_DB_PATH = Path("data/centric.duckdb")
+DEFAULT_MASTER_RECONSTRUCTION_PATH = Path("data/results/master-products.jsonl")
 DEFAULT_PROJECTED_PRODUCTS_PATH = Path("data/results/projected-products.jsonl")
 
 
@@ -80,12 +81,12 @@ def reconstruct(
     ] = DEFAULT_DB_PATH,
     output: Annotated[
         Path,
-        typer.Option("--output", "-o", help="Projected product JSONL."),
-    ] = DEFAULT_PROJECTED_PRODUCTS_PATH,
+        typer.Option("--output", "-o", help="Target projection JSONL."),
+    ] = DEFAULT_MASTER_RECONSTRUCTION_PATH,
     target: Annotated[
         str,
         typer.Option("--target", "-t", help="Projection target to materialize from master state."),
-    ] = "dpp",
+    ] = "master",
 ) -> None:
     """Build master reconstruction state and materialize a target projection."""
 
@@ -121,8 +122,8 @@ def pipeline(
     ] = DEFAULT_PROJECTED_PRODUCTS_PATH,
     target: Annotated[
         str,
-        typer.Option("--target", "-t", help="Projection target to validate/report."),
-    ] = "dpp",
+        typer.Option("--target", "-t", help="Required projection target to validate/report."),
+    ] = ...,
     schema: Annotated[
         Path | None,
         typer.Option("--schema", help="Endpoint merge schema YAML."),

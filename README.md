@@ -60,15 +60,15 @@ uv run centric-mdm ingest \
   --db data/centric.duckdb
 ```
 
-Build the master reconstruction graph and materialize a target projection. `dpp` is the default
-target:
+Build the master reconstruction graph and write it to JSONL for inspection:
 
 ```bash
 uv run centric-mdm reconstruct \
   --db data/centric.duckdb \
-  --target dpp \
-  --output data/results/projected-products.jsonl
+  --output data/results/master-products.jsonl
 ```
+
+Use `--target dpp` later when the private DPP projection has been implemented.
 
 Or run ingest, reconstruct, and validation together:
 
