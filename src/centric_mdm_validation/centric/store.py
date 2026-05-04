@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,7 +12,14 @@ from typing import Any
 import duckdb
 
 from centric_mdm_validation.centric.mapper import ProjectionMapping
-from centric_mdm_validation.centric.reconstruction import reconstruct_products_from_records
+from centric_mdm_validation.centric.reconstruction import (
+    DEFAULT_PROJECTION_TARGET,
+    ReconstructedProduct,
+    ReconstructionSourceRef,
+    ReconstructionWarning,
+    project_master_products,
+    reconstruct_master_products_from_records,
+)
 from centric_mdm_validation.centric.schema import EndpointSchema
 from centric_mdm_validation.io import write_jsonl
 from centric_mdm_validation.models import CentricProductPayload
@@ -37,6 +44,13 @@ class IngestResult:
     records_upserted: int
     records_deleted: int
     endpoints: dict[str, int]
+
+
+@dataclass(frozen=True)
+class MasterReconstructionResult:
+    products_reconstructed: int
+    source_refs: int
+    warnings: int
 
 
 @dataclass(frozen=True)
@@ -207,11 +221,29 @@ def write_reconstructed_products(
     output_path: Path,
     *,
     mapping: ProjectionMapping | None = None,
-) -> list[CentricProductPayload]:
-    payloads = reconstruct_products(db_path, mapping=mapping)
+    target: str = DEFAULT_PROJECTION_TARGET,
+) -> list[Any]:
+    rebuild_master_reconstruction(db_path, mapping=mapping)
+    payloads = write_projected_products_from_master(
+        db_path,
+        output_path,
+        target=target,
+        mapping=mapping,
+    )
+    return payloads
+
+
+def write_projected_products_from_master(
+    db_path: Path,
+    output_path: Path,
+    *,
+    target: str = DEFAULT_PROJECTION_TARGET,
+    mapping: ProjectionMapping | None = None,
+) -> list[Any]:
+    payloads = project_products_from_master(db_path, target=target, mapping=mapping)
     write_jsonl(
         output_path,
-        (payload.model_dump(mode="json", exclude_none=True) for payload in payloads),
+        (_payload_to_json_record(payload) for payload in payloads),
     )
     return payloads
 
@@ -221,9 +253,154 @@ def reconstruct_products(
     *,
     mapping: ProjectionMapping | None = None,
 ) -> list[CentricProductPayload]:
+    rebuild_master_reconstruction(db_path, mapping=mapping)
+    payloads = project_products_from_master(
+        db_path,
+        target=DEFAULT_PROJECTION_TARGET,
+        mapping=mapping,
+    )
+    return [
+        CentricProductPayload.model_validate(_payload_to_json_record(payload))
+        for payload in payloads
+    ]
+
+
+def rebuild_master_reconstruction(
+    db_path: Path,
+    *,
+    mapping: ProjectionMapping | None = None,
+) -> MasterReconstructionResult:
     with duckdb.connect(str(db_path)) as conn:
         records_by_endpoint = load_current_endpoint_records(conn)
-    return reconstruct_products_from_records(records_by_endpoint, mapping=mapping)
+        products = reconstruct_master_products_from_records(records_by_endpoint, mapping=mapping)
+        write_master_reconstruction(conn, products)
+    return MasterReconstructionResult(
+        products_reconstructed=len(products),
+        source_refs=sum(len(product.source_refs) for product in products),
+        warnings=sum(len(product.warnings) for product in products),
+    )
+
+
+def project_products_from_master(
+    db_path: Path,
+    *,
+    target: str = DEFAULT_PROJECTION_TARGET,
+    mapping: ProjectionMapping | None = None,
+) -> list[Any]:
+    with duckdb.connect(str(db_path)) as conn:
+        initialize_store(conn)
+        products = load_master_reconstruction(conn)
+    return project_master_products(products, target=target, mapping=mapping)
+
+
+def write_master_reconstruction(
+    conn: duckdb.DuckDBPyConnection,
+    products: Iterable[ReconstructedProduct],
+) -> None:
+    initialize_store(conn)
+    product_list = list(products)
+    reconstructed_at = _format_datetime(datetime.now(UTC))
+    conn.execute("DELETE FROM reconstruction_source_refs")
+    conn.execute("DELETE FROM reconstruction_warnings")
+    conn.execute("DELETE FROM reconstructed_products")
+    if not product_list:
+        return
+
+    conn.executemany(
+        """
+        INSERT INTO reconstructed_products (
+            product_id, style_id, brand_code, season, product_type_code,
+            graph_json, warning_count, reconstructed_at, reconstructed_at_ts
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, try_cast(? AS TIMESTAMP))
+        """,
+        [
+            [
+                product.product_id,
+                product.style_id,
+                product.brand_code,
+                product.season,
+                product.product_type_code,
+                json.dumps(product.graph, default=str, separators=(",", ":")),
+                len(product.warnings),
+                reconstructed_at,
+                reconstructed_at,
+            ]
+            for product in product_list
+        ],
+    )
+
+    source_rows = [
+        [
+            product.product_id,
+            source_ref.endpoint,
+            source_ref.record_id,
+            source_ref.relation_type,
+        ]
+        for product in product_list
+        for source_ref in product.source_refs
+    ]
+    if source_rows:
+        conn.executemany(
+            """
+            INSERT INTO reconstruction_source_refs (
+                product_id, source_endpoint, source_record_id, relation_type
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            source_rows,
+        )
+
+    warning_rows = [
+        [
+            product.product_id,
+            warning.severity,
+            warning.code,
+            warning.message,
+            warning.source_endpoint,
+            warning.source_record_id,
+        ]
+        for product in product_list
+        for warning in product.warnings
+    ]
+    if warning_rows:
+        conn.executemany(
+            """
+            INSERT INTO reconstruction_warnings (
+                product_id, severity, code, message, source_endpoint, source_record_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            warning_rows,
+        )
+
+
+def load_master_reconstruction(
+    conn: duckdb.DuckDBPyConnection,
+) -> list[ReconstructedProduct]:
+    initialize_store(conn)
+    rows = conn.execute(
+        """
+        SELECT product_id, style_id, brand_code, season, product_type_code, graph_json
+        FROM reconstructed_products
+        ORDER BY product_id
+        """
+    ).fetchall()
+    source_refs = _load_reconstruction_source_refs(conn)
+    warnings = _load_reconstruction_warnings(conn)
+    return [
+        ReconstructedProduct(
+            product_id=str(product_id),
+            style_id=style_id,
+            brand_code=brand_code,
+            season=season,
+            product_type_code=product_type_code,
+            graph=json.loads(graph_json),
+            source_refs=tuple(source_refs.get(str(product_id), [])),
+            warnings=tuple(warnings.get(str(product_id), [])),
+        )
+        for product_id, style_id, brand_code, season, product_type_code, graph_json in rows
+    ]
 
 
 def load_current_endpoint_records(
@@ -336,6 +513,7 @@ def initialize_store(conn: duckdb.DuckDBPyConnection) -> None:
         """
     )
     ensure_current_endpoint_views(conn)
+    _initialize_master_reconstruction_tables(conn)
 
 
 def ensure_current_endpoint_views(
@@ -370,6 +548,109 @@ def ensure_current_endpoint_views(
             WHERE endpoint = {_quote_literal(endpoint)}
             """,
         )
+
+
+def _initialize_master_reconstruction_tables(conn: duckdb.DuckDBPyConnection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS reconstructed_products (
+            product_id VARCHAR PRIMARY KEY,
+            style_id VARCHAR,
+            brand_code VARCHAR,
+            season VARCHAR,
+            product_type_code VARCHAR,
+            graph_json VARCHAR NOT NULL,
+            warning_count INTEGER NOT NULL,
+            reconstructed_at VARCHAR NOT NULL,
+            reconstructed_at_ts TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS reconstruction_source_refs (
+            product_id VARCHAR NOT NULL,
+            source_endpoint VARCHAR NOT NULL,
+            source_record_id VARCHAR NOT NULL,
+            relation_type VARCHAR
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS reconstruction_warnings (
+            product_id VARCHAR NOT NULL,
+            severity VARCHAR NOT NULL,
+            code VARCHAR NOT NULL,
+            message VARCHAR NOT NULL,
+            source_endpoint VARCHAR,
+            source_record_id VARCHAR
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE OR REPLACE VIEW current_reconstructed_products AS
+        SELECT
+            product_id,
+            style_id,
+            brand_code,
+            season,
+            product_type_code,
+            graph_json,
+            graph_json::JSON AS graph,
+            warning_count,
+            reconstructed_at AS reconstructed_at_raw,
+            reconstructed_at_ts
+        FROM reconstructed_products
+        """
+    )
+
+
+def _load_reconstruction_source_refs(
+    conn: duckdb.DuckDBPyConnection,
+) -> dict[str, list[ReconstructionSourceRef]]:
+    rows = conn.execute(
+        """
+        SELECT product_id, source_endpoint, source_record_id, relation_type
+        FROM reconstruction_source_refs
+        ORDER BY product_id, source_endpoint, source_record_id
+        """
+    ).fetchall()
+    refs: defaultdict[str, list[ReconstructionSourceRef]] = defaultdict(list)
+    for product_id, source_endpoint, source_record_id, relation_type in rows:
+        refs[str(product_id)].append(
+            ReconstructionSourceRef(
+                endpoint=str(source_endpoint),
+                record_id=str(source_record_id),
+                relation_type=relation_type,
+            )
+        )
+    return refs
+
+
+def _load_reconstruction_warnings(
+    conn: duckdb.DuckDBPyConnection,
+) -> dict[str, list[ReconstructionWarning]]:
+    rows = conn.execute(
+        """
+        SELECT product_id, severity, code, message, source_endpoint, source_record_id
+        FROM reconstruction_warnings
+        ORDER BY product_id, severity, code
+        """
+    ).fetchall()
+    warnings: defaultdict[str, list[ReconstructionWarning]] = defaultdict(list)
+    for product_id, severity, code, message, source_endpoint, source_record_id in rows:
+        warnings[str(product_id)].append(
+            ReconstructionWarning(
+                severity=str(severity),
+                code=str(code),
+                message=str(message),
+                source_endpoint=source_endpoint,
+                source_record_id=source_record_id,
+            )
+        )
+    return warnings
 
 
 def _applied_hash(conn: duckdb.DuckDBPyConnection, path: Path) -> str | None:
@@ -548,6 +829,14 @@ def _quote_identifier(value: str) -> str:
 
 def _quote_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
+
+
+def _payload_to_json_record(payload: Any) -> dict[str, Any]:
+    if hasattr(payload, "model_dump"):
+        return payload.model_dump(mode="json", exclude_none=True)
+    if isinstance(payload, dict):
+        return payload
+    raise TypeError("Projected payloads must be mappings or Pydantic models.")
 
 
 def _ensure_column(

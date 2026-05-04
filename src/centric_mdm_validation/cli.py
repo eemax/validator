@@ -11,7 +11,8 @@ from centric_mdm_validation.centric.store import (
     IngestFileProgress,
     discover_raw_files,
     ingest_raw_dir,
-    write_reconstructed_products,
+    rebuild_master_reconstruction,
+    write_projected_products_from_master,
 )
 from centric_mdm_validation.io import read_json_records, write_json
 from centric_mdm_validation.models import CentricProductPayload
@@ -108,17 +109,31 @@ def reconstruct(
         Path,
         typer.Option("--output", "-o", help="Projected product JSONL."),
     ] = DEFAULT_PROJECTED_PRODUCTS_PATH,
+    target: Annotated[
+        str,
+        typer.Option("--target", "-t", help="Projection target to materialize from master state."),
+    ] = "dpp",
     mapping: Annotated[
         Path | None,
         typer.Option("--mapping", "-m", help="Optional local projection field mapping YAML."),
     ] = None,
 ) -> None:
-    """Project current reconstructed store state into validator product payloads."""
+    """Build master reconstruction state and materialize a target projection."""
 
-    _echo_step(f"Reconstruct: reading current endpoint state from {db}")
-    _echo_step(f"Reconstruct: writing validator payloads to {output}")
-    payloads = write_reconstructed_products(db, output, mapping=load_projection_mapping(mapping))
-    _echo_done(f"Reconstructed {len(payloads)} products from {db} into {output}")
+    _echo_step(f"Reconstruct: building master product graph from {db}")
+    master_result = rebuild_master_reconstruction(db, mapping=load_projection_mapping(mapping))
+    _echo_done(
+        f"Master reconstruction stored {master_result.products_reconstructed} products "
+        f"({master_result.source_refs} source refs, {master_result.warnings} warnings)"
+    )
+    _echo_step(f"Reconstruct: projecting target {target!r} into {output}")
+    payloads = write_projected_products_from_master(
+        db,
+        output,
+        target=target,
+        mapping=load_projection_mapping(mapping),
+    )
+    _echo_done(f"Projected {len(payloads)} {target} payloads from master reconstruction")
 
 
 @app.command()
@@ -135,6 +150,10 @@ def pipeline(
         Path,
         typer.Option("--projected-output", help="Projected product JSONL."),
     ] = DEFAULT_PROJECTED_PRODUCTS_PATH,
+    target: Annotated[
+        str,
+        typer.Option("--target", "-t", help="Projection target to validate/report."),
+    ] = "dpp",
     schema: Annotated[
         Path | None,
         typer.Option("--schema", help="Endpoint merge schema YAML."),
@@ -157,13 +176,20 @@ def pipeline(
 
     _echo_step("Pipeline: starting ingest")
     ingest_result = _run_ingest(raw_dir=raw_dir, db=db, schema=schema)
-    _echo_step("Pipeline: reconstructing product payloads")
-    payloads = write_reconstructed_products(
+    if target != "dpp":
+        raise typer.BadParameter("Pipeline validation/reporting currently supports target 'dpp'.")
+    _echo_step("Pipeline: building master reconstruction")
+    master_result = rebuild_master_reconstruction(db, mapping=load_projection_mapping(mapping))
+    _echo_done(f"Master reconstruction stored {master_result.products_reconstructed} products")
+    _echo_step(f"Pipeline: projecting {target} payloads")
+    projected_payloads = write_projected_products_from_master(
         db,
         projected_output,
+        target=target,
         mapping=load_projection_mapping(mapping),
     )
-    _echo_done(f"Reconstructed {len(payloads)} products into {projected_output}")
+    payloads = [_coerce_dpp_payload(payload) for payload in projected_payloads]
+    _echo_done(f"Projected {len(payloads)} products into {projected_output}")
     _echo_step(f"Pipeline: validating {len(payloads)} products")
     run = _validate_payloads(payloads, rules)
     _echo_step(f"Pipeline: writing validation results to {validation_output}")
@@ -275,6 +301,12 @@ def _validate(input_path: Path, rules: Path | None):
     records = read_json_records(input_path)
     payloads = [CentricProductPayload.model_validate(record) for record in records]
     return _validate_payloads(payloads, rules)
+
+
+def _coerce_dpp_payload(payload) -> CentricProductPayload:
+    if hasattr(payload, "model_dump"):
+        payload = payload.model_dump(mode="json", exclude_none=True)
+    return CentricProductPayload.model_validate(payload)
 
 
 def _validate_payloads(payloads: list[CentricProductPayload], rules: Path | None):

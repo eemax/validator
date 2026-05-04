@@ -220,6 +220,41 @@ def test_load_current_endpoint_records_returns_endpoint_groups(tmp_path) -> None
     assert records == {"materials": [{"id": "M1", "node_name": "Cotton"}]}
 
 
+def test_reconstruct_products_writes_master_reconstruction_tables(tmp_path) -> None:
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    _write_jsonl(
+        raw_dir / "styles.jsonl",
+        [{"id": "S1", "node_name": "Master Style", "brand_code": "BR"}],
+    )
+    db_path = tmp_path / "centric.duckdb"
+    ingest_raw_dir(raw_dir, db_path, schemas=load_endpoint_schemas())
+
+    payloads = reconstruct_products(db_path)
+
+    with duckdb.connect(str(db_path)) as conn:
+        product_row = conn.execute(
+            """
+            SELECT product_id, brand_code, graph
+            FROM current_reconstructed_products
+            WHERE product_id = 'S1'
+            """
+        ).fetchone()
+        source_count = conn.execute(
+            """
+            SELECT count(*)
+            FROM reconstruction_source_refs
+            WHERE product_id = 'S1'
+            """
+        ).fetchone()[0]
+
+    assert payloads[0].centric_style_id == "S1"
+    assert product_row[0] == "S1"
+    assert product_row[1] == "BR"
+    assert product_row[2] is not None
+    assert source_count == 1
+
+
 def test_ingest_raw_dir_records_manifest_metadata(tmp_path) -> None:
     raw_dir = tmp_path / "raw"
     run_dir = raw_dir / "runs" / "2026-05-03T102233Z-months2"

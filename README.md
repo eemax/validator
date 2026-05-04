@@ -72,11 +72,13 @@ uv run centric-mdm ingest \
   --db data/centric.duckdb
 ```
 
-Project the current reconstructed store state back to the validator JSONL contract:
+Build the master reconstruction graph and materialize a target projection. `dpp` is the default
+target:
 
 ```bash
 uv run centric-mdm reconstruct \
   --db data/centric.duckdb \
+  --target dpp \
   --output data/results/projected-products.jsonl
 ```
 
@@ -86,6 +88,7 @@ Or run ingest, reconstruct, and validation together:
 uv run centric-mdm pipeline \
   --raw-dir data/raw \
   --db data/centric.duckdb \
+  --target dpp \
   --projected-output data/results/projected-products.jsonl \
   --validation-output data/results/dpp-readiness-results.json
 ```
@@ -105,9 +108,25 @@ schema. These views are the intended boundary for letting DuckDB handle set-base
 joins, and affected-product discovery while private Python reconstruction handles proprietary
 product semantics.
 
-The detailed reconstruction rules are expected to be proprietary. They should live outside the
-public repo and be resolved from `CENTRIC_CONFIG_DIR/reconstruction.py` or
-`.local/reconstruction.py`.
+The detailed master reconstruction and target projections are expected to be proprietary. They
+should live outside the public repo and be resolved from `CENTRIC_CONFIG_DIR/reconstruction.py` or
+`.local/reconstruction.py`. The preferred private hooks are:
+
+```python
+def reconstruct_master_products(records_by_endpoint, *, mapping=None):
+    ...
+
+
+def project_reconstructed_products(target, reconstructed_products, *, mapping=None):
+    ...
+```
+
+`reconstruct` writes the master graph into DuckDB tables such as `reconstructed_products`,
+`reconstruction_source_refs`, and `reconstruction_warnings`, then projects that graph into the
+requested target contract. For compatibility, an existing private
+`reconstruct_projected_products(records_by_endpoint, *, mapping=None)` hook is still accepted as
+the DPP fallback, but new target formats such as packaging or ERP item master validation should be
+implemented as projections from the master reconstruction graph.
 
 Company-specific Centric attribute names live outside the public repo. Put private config under
 `CENTRIC_CONFIG_DIR`, or use `.local/` for repo-adjacent local work. `.local/` is gitignored.
