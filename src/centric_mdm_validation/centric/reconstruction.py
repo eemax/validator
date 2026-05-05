@@ -63,6 +63,16 @@ class ProjectionFunction(Protocol):
         self,
         target: str,
         reconstructed_products: Iterable[ReconstructedProduct],
+        *,
+        records_by_endpoint: Mapping[str, Iterable[dict[str, Any]]] | None = None,
+    ) -> Iterable[BaseModel | Mapping[str, Any]]: ...
+
+
+class TargetReconstructionFunction(Protocol):
+    def __call__(
+        self,
+        target: str,
+        records_by_endpoint: Mapping[str, Iterable[dict[str, Any]]],
     ) -> Iterable[BaseModel | Mapping[str, Any]]: ...
 
 
@@ -151,6 +161,7 @@ def project_master_products(
     reconstructed_products: Iterable[ReconstructedProduct],
     *,
     target: str = DEFAULT_PROJECTION_TARGET,
+    records_by_endpoint: Mapping[str, Iterable[dict[str, Any]]] | None = None,
     reconstruction_path: Path | None = None,
 ) -> list[BaseModel | dict[str, Any]]:
     """Project reconstruction output into a check or target-specific payload contract."""
@@ -163,14 +174,44 @@ def project_master_products(
     if module is not None:
         projection = getattr(module, "project_reconstructed_products", None)
         if callable(projection):
-            return [
-                _coerce_projected_payload(payload)
-                for payload in projection(target, products)
-            ]
+            try:
+                payloads = projection(
+                    target,
+                    products,
+                    records_by_endpoint=records_by_endpoint,
+                )
+            except TypeError as exc:
+                if "records_by_endpoint" not in str(exc):
+                    raise
+                payloads = projection(target, products)
+            return [_coerce_projected_payload(payload) for payload in payloads]
 
     raise ValueError(
         f"Private projection required for target {target!r}. Define "
         "project_reconstructed_products(target, reconstructed_products) "
+        f"in {RECONSTRUCTION_CONFIG_PATH}."
+    )
+
+
+def reconstruct_target_records(
+    target: str,
+    records_by_endpoint: Mapping[str, Iterable[dict[str, Any]]],
+    *,
+    reconstruction_path: Path | None = None,
+) -> list[BaseModel | dict[str, Any]]:
+    """Build target-specific reconstruction records directly from endpoint state."""
+
+    module = load_private_reconstruction_module(reconstruction_path)
+    reconstruction = getattr(module, "reconstruct_target_records", None) if module else None
+    if callable(reconstruction):
+        return [
+            _coerce_projected_payload(payload)
+            for payload in reconstruction(target, records_by_endpoint)
+        ]
+
+    raise ValueError(
+        f"Private reconstruction required for target {target!r}. Define "
+        "reconstruct_target_records(target, records_by_endpoint) "
         f"in {RECONSTRUCTION_CONFIG_PATH}."
     )
 

@@ -21,6 +21,7 @@ from centric_mdm_validation.centric.reconstruction import (
     ReconstructionWarning,
     project_master_products,
     reconstruct_master_products_from_records,
+    reconstruct_target_records,
 )
 from centric_mdm_validation.centric.schema import EndpointSchema
 from centric_mdm_validation.io import write_jsonl
@@ -231,6 +232,20 @@ def write_projected_products_from_master(
     return payloads
 
 
+def write_target_reconstruction(
+    db_path: Path,
+    output_path: Path,
+    *,
+    target: str,
+) -> list[Any]:
+    payloads = reconstruct_products_for_target(db_path, target=target)
+    write_jsonl(
+        output_path,
+        (_payload_to_json_record(payload) for payload in payloads),
+    )
+    return payloads
+
+
 def rebuild_master_reconstruction(
     db_path: Path,
 ) -> MasterReconstructionResult:
@@ -253,7 +268,25 @@ def project_products_from_master(
     with duckdb.connect(str(db_path)) as conn:
         initialize_store(conn)
         products = load_master_reconstruction(conn)
-    return project_master_products(products, target=target)
+        records_by_endpoint = (
+            None if target == DEFAULT_PROJECTION_TARGET else load_current_endpoint_records(conn)
+        )
+    return project_master_products(
+        products,
+        target=target,
+        records_by_endpoint=records_by_endpoint,
+    )
+
+
+def reconstruct_products_for_target(
+    db_path: Path,
+    *,
+    target: str,
+) -> list[Any]:
+    with duckdb.connect(str(db_path)) as conn:
+        initialize_store(conn)
+        records_by_endpoint = load_current_endpoint_records(conn)
+    return reconstruct_target_records(target, records_by_endpoint)
 
 
 def write_master_reconstruction(

@@ -7,6 +7,7 @@ from centric_mdm_validation.centric.reconstruction import (
     load_private_reconstruction_module,
     project_master_products,
     reconstruct_master_products_from_records,
+    reconstruct_target_records,
     report_validation_results,
     resolve_reconstruction_path,
     validate_projected_products,
@@ -59,6 +60,56 @@ def project_reconstructed_products(target, reconstructed_products):
     assert products[0].source_refs[0].endpoint == "styles"
     assert payloads[0]["centric_style_id"] == "MASTER-1"
     assert payloads[0]["style_name"] == "dpp: BR"
+
+
+def test_projection_hook_can_receive_current_endpoint_records(tmp_path) -> None:
+    module_path = tmp_path / "reconstruction.py"
+    module_path.write_text(
+        """
+def project_reconstructed_products(target, reconstructed_products, *, records_by_endpoint=None):
+    return [
+        {
+            "target": target,
+            "products": len(list(reconstructed_products)),
+            "styles": len(records_by_endpoint["styles"]),
+        }
+    ]
+""",
+        encoding="utf-8",
+    )
+
+    payloads = project_master_products(
+        [{"product_id": "S1"}],
+        target="dpp",
+        records_by_endpoint={"styles": [{"id": "S1"}, {"id": "S2"}]},
+        reconstruction_path=module_path,
+    )
+
+    assert payloads == [{"target": "dpp", "products": 1, "styles": 2}]
+
+
+def test_target_reconstruction_hook_builds_directly_from_endpoint_records(tmp_path) -> None:
+    module_path = tmp_path / "reconstruction.py"
+    module_path.write_text(
+        """
+def reconstruct_target_records(target, records_by_endpoint):
+    return [
+        {
+            "target": target,
+            "styles": [record["id"] for record in records_by_endpoint["styles"]],
+        }
+    ]
+""",
+        encoding="utf-8",
+    )
+
+    payloads = reconstruct_target_records(
+        "dpp",
+        {"styles": [{"id": "S1"}, {"id": "S2"}]},
+        reconstruction_path=module_path,
+    )
+
+    assert payloads == [{"target": "dpp", "styles": ["S1", "S2"]}]
 
 
 def test_project_master_products_requires_private_projection_for_dpp(

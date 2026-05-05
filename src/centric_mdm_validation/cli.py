@@ -19,6 +19,7 @@ from centric_mdm_validation.centric.store import (
     ingest_raw_dir,
     rebuild_master_reconstruction,
     write_projected_products_from_master,
+    write_target_reconstruction,
 )
 from centric_mdm_validation.io import read_json_records, write_json
 from centric_mdm_validation.models import CentricProductPayload, ReconstructionCheckPayload
@@ -106,6 +107,16 @@ def reconstruct(
 
     output_path = output or _default_reconstruct_output(target)
     _echo_reconstruction_runtime(target)
+    if target != "check":
+        _echo_step(f"Reconstruct: building {target} records from endpoint state in {db}")
+        payloads = write_target_reconstruction(
+            db,
+            output_path,
+            target=target,
+        )
+        _echo_done(f"Wrote {len(payloads)} {target} records to {output_path}")
+        return
+
     _echo_step(f"Reconstruct: building style relationship state from {db}")
     master_result = rebuild_master_reconstruction(db)
     _echo_done(
@@ -158,11 +169,8 @@ def pipeline(
     _echo_step("Pipeline: starting ingest")
     ingest_result = _run_ingest(raw_dir=raw_dir, db=db, schema=schema)
     _echo_reconstruction_runtime(target)
-    _echo_step("Pipeline: building reconstruction state")
-    master_result = rebuild_master_reconstruction(db)
-    _echo_done(f"Reconstruction stored {master_result.products_reconstructed} styles")
-    _echo_step(f"Pipeline: projecting {target} payloads")
-    projected_payloads = write_projected_products_from_master(
+    _echo_step(f"Pipeline: building {target} records from endpoint state")
+    projected_payloads = write_target_reconstruction(
         db,
         projected_output,
         target=target,
