@@ -131,12 +131,12 @@ class ReconstructionCheckValidator:
     ) -> list[ValidationIssue]:
         return [
             ValidationIssue(
-                code="UNRESOLVED_RECONSTRUCTION_REF",
+                code=_unresolved_code(ref),
                 message=_unresolved_message(ref),
                 severity=Severity.ERROR,
                 fix_location=FixLocation.MDM,
                 source_field="unresolved_refs",
-                rule_id="reconstruction.refs.resolved",
+                rule_id=f"reconstruction.refs.{_unresolved_status(ref)}",
             )
             for ref in payload.unresolved_refs
         ]
@@ -181,9 +181,38 @@ def _count_bucket(payload: ReconstructionCheckPayload, key: str) -> dict[str, in
 
 
 def _unresolved_message(ref: dict[str, Any]) -> str:
+    status = _unresolved_status(ref)
     relation = ref.get("relation") or ref.get("relation_type") or "relationship"
     endpoint = ref.get("endpoint") or ref.get("source_endpoint") or "endpoint"
     record_id = ref.get("record_id") or ref.get("source_record_id") or ref.get("id")
+    if status == "invalid_ref":
+        if record_id:
+            return f"Invalid {relation} reference value {record_id}; it is not a Centric record id."
+        return f"Invalid {relation} reference value; it is not a Centric record id."
+    if status == "not_seen":
+        if record_id:
+            return (
+                f"{relation} references {endpoint} record {record_id}, "
+                "but that record was not seen in the current ingested data store."
+            )
+        return (
+            f"{relation} references {endpoint}, but that record was not seen "
+            "in the current ingested data store."
+        )
     if record_id:
         return f"Unresolved {relation} reference to {endpoint} record {record_id}."
     return f"Unresolved {relation} reference to {endpoint}."
+
+
+def _unresolved_code(ref: dict[str, Any]) -> str:
+    status = _unresolved_status(ref)
+    if status == "invalid_ref":
+        return "INVALID_REFERENCE_VALUE"
+    if status == "not_seen":
+        return "REFERENCED_RECORD_NOT_SEEN"
+    return "UNRESOLVED_RECONSTRUCTION_REF"
+
+
+def _unresolved_status(ref: dict[str, Any]) -> str:
+    status = ref.get("status")
+    return str(status or "unresolved")
