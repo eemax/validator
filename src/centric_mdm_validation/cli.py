@@ -5,7 +5,13 @@ import typer
 
 from centric_mdm_validation.centric.cli import main as fetcher_main
 from centric_mdm_validation.centric.config import resolve_private_config_path
-from centric_mdm_validation.centric.reconstruction import inspect_reconstruction_runtime
+from centric_mdm_validation.centric.reconstruction import (
+    has_private_report_hook,
+    has_private_validation_hook,
+    inspect_reconstruction_runtime,
+    report_validation_results,
+    validate_projected_products,
+)
 from centric_mdm_validation.centric.schema import load_endpoint_schemas
 from centric_mdm_validation.centric.store import (
     IngestFileProgress,
@@ -151,8 +157,6 @@ def pipeline(
 
     _echo_step("Pipeline: starting ingest")
     ingest_result = _run_ingest(raw_dir=raw_dir, db=db, schema=schema)
-    if target != "dpp":
-        raise typer.BadParameter("Pipeline validation/reporting currently supports target 'dpp'.")
     _echo_reconstruction_runtime(target)
     _echo_step("Pipeline: building reconstruction state")
     master_result = rebuild_master_reconstruction(db)
@@ -163,20 +167,21 @@ def pipeline(
         projected_output,
         target=target,
     )
-    payloads = [_coerce_dpp_payload(payload) for payload in projected_payloads]
-    _echo_done(f"Projected {len(payloads)} products into {projected_output}")
-    _echo_step(f"Pipeline: validating {len(payloads)} products")
-    run = _validate_payloads(payloads, rules)
+    _echo_done(f"Projected {len(projected_payloads)} products into {projected_output}")
+    _echo_step(f"Pipeline: validating {len(projected_payloads)} products")
+    run = _validate_records(projected_payloads, rules, target=target)
     _echo_step(f"Pipeline: writing validation results to {validation_output}")
-    write_json(validation_output, run.model_dump(mode="json"))
+    _write_validation_result(validation_output, run)
     if report_output_dir is not None:
         _echo_step(f"Pipeline: writing reports to {report_output_dir}")
-        DppReadinessReporter().write_all(run, report_output_dir)
+        _write_report_for_target(target, run, report_output_dir)
 
+    total, ready = _validation_counts(run)
     _echo_done(
         f"Pipeline complete: {ingest_result.applied_files} raw files applied "
-        f"({ingest_result.skipped_files} skipped), {len(payloads)} products reconstructed, "
-        f"{run.ready_products}/{run.total_products} ready. Results: {validation_output}"
+        f"({ingest_result.skipped_files} skipped), "
+        f"{len(projected_payloads)} products reconstructed, "
+        f"{ready}/{total} ready. Results: {validation_output}"
     )
 
 
@@ -203,10 +208,12 @@ def validate(
     _echo_step(f"Validate: reading {target} records from {input_file}")
     run = _validate(input_file, rules, target=target)
     _echo_step(f"Validate: writing results to {output_file}")
-    write_json(output_file, run.model_dump(mode="json"))
+    _write_validation_result(output_file, run)
+    total, ready = _validation_counts(run)
+    readiness = _readiness_percent(run)
     _echo_done(
-        f"Validated {run.total_products} records: {run.ready_products} ready "
-        f"({run.readiness_percent}%). Results: {output_file}"
+        f"Validated {total} records: {ready} ready "
+        f"({readiness}%). Results: {output_file}"
     )
 
 
@@ -233,8 +240,9 @@ def report(
     _echo_step(f"Report: reading {target} records from {input_file}")
     run = _validate(input_file, rules, target=target)
     _echo_step(f"Report: writing report files to {output_path}")
-    _reporter_for_target(target).write_all(run, output_path)
-    _echo_done(f"Wrote {target} reports for {run.total_products} records into {output_path}")
+    _write_report_for_target(target, run, output_path)
+    total, _ = _validation_counts(run)
+    _echo_done(f"Wrote {target} reports for {total} records into {output_path}")
 
 
 def _run_ingest(raw_dir: Path, db: Path, schema: Path | None):
@@ -294,13 +302,17 @@ def _echo_done(message: str) -> None:
 
 def _validate(input_path: Path, rules: Path | None, *, target: str):
     records = read_json_records(input_path)
+    return _validate_records(records, rules, target=target)
+
+
+def _validate_records(records, rules: Path | None, *, target: str):
     if target == "check":
         payloads = [ReconstructionCheckPayload.model_validate(record) for record in records]
         return ReconstructionCheckValidator().validate_many(payloads)
+    if has_private_validation_hook():
+        return validate_projected_products(target, records, rules=rules)
     if target != "dpp":
-        raise typer.BadParameter(
-            "Validation/reporting currently supports targets 'check' and 'dpp'."
-        )
+        raise typer.BadParameter(f"Private validation required for target {target!r}.")
     payloads = [CentricProductPayload.model_validate(record) for record in records]
     return _validate_payloads(payloads, rules)
 
@@ -320,7 +332,9 @@ def _validate_payloads(payloads: list[CentricProductPayload], rules: Path | None
 def _default_reconstruct_output(target: str) -> Path:
     if target == "check":
         return DEFAULT_RECONSTRUCTION_CHECK_PATH
-    return DEFAULT_PROJECTED_PRODUCTS_PATH
+    if target == "dpp":
+        return DEFAULT_PROJECTED_PRODUCTS_PATH
+    return Path("data/results") / f"{_target_slug(target)}-products.jsonl"
 
 
 def _default_validate_input(target: str) -> Path:
@@ -328,7 +342,7 @@ def _default_validate_input(target: str) -> Path:
         return DEFAULT_RECONSTRUCTION_CHECK_PATH
     if target == "dpp":
         return DEFAULT_PROJECTED_PRODUCTS_PATH
-    raise typer.BadParameter("Validation/reporting currently supports targets 'check' and 'dpp'.")
+    return Path("data/results") / f"{_target_slug(target)}-products.jsonl"
 
 
 def _default_validate_output(target: str) -> Path:
@@ -336,7 +350,7 @@ def _default_validate_output(target: str) -> Path:
         return DEFAULT_RECONSTRUCTION_CHECK_RESULTS_PATH
     if target == "dpp":
         return DEFAULT_DPP_RESULTS_PATH
-    raise typer.BadParameter("Validation/reporting currently supports targets 'check' and 'dpp'.")
+    return Path("data/results") / f"{_target_slug(target)}-results.json"
 
 
 def _default_report_output_dir(target: str) -> Path:
@@ -344,12 +358,50 @@ def _default_report_output_dir(target: str) -> Path:
         return DEFAULT_RECONSTRUCTION_CHECK_REPORT_DIR
     if target == "dpp":
         return DEFAULT_DPP_REPORT_DIR
-    raise typer.BadParameter("Validation/reporting currently supports targets 'check' and 'dpp'.")
+    return Path("reports") / _target_slug(target)
 
 
-def _reporter_for_target(target: str):
+def _write_report_for_target(target: str, run, output_dir: Path) -> None:
+    if target not in {"check", "dpp"} and has_private_report_hook():
+        report_validation_results(target, run, output_dir)
+        return
     if target == "check":
-        return ReconstructionCheckReporter()
+        ReconstructionCheckReporter().write_all(run, output_dir)
+        return
     if target == "dpp":
-        return DppReadinessReporter()
-    raise typer.BadParameter("Validation/reporting currently supports targets 'check' and 'dpp'.")
+        if has_private_report_hook():
+            report_validation_results(target, run, output_dir)
+            return
+        DppReadinessReporter().write_all(run, output_dir)
+        return
+    if has_private_report_hook():
+        report_validation_results(target, run, output_dir)
+        return
+    raise typer.BadParameter(f"Private reporting required for target {target!r}.")
+
+
+def _write_validation_result(output_path: Path, run) -> None:
+    if hasattr(run, "model_dump"):
+        write_json(output_path, run.model_dump(mode="json"))
+    else:
+        write_json(output_path, run)
+
+
+def _validation_counts(run) -> tuple[int, int]:
+    total = _result_value(run, "total_products", default=0)
+    ready = _result_value(run, "ready_products", default=0)
+    return int(total or 0), int(ready or 0)
+
+
+def _readiness_percent(run) -> float:
+    return float(_result_value(run, "readiness_percent", default=0.0) or 0.0)
+
+
+def _result_value(run, key: str, *, default):
+    if isinstance(run, dict):
+        return run.get(key, default)
+    return getattr(run, key, default)
+
+
+def _target_slug(target: str) -> str:
+    return "".join(character if character.isalnum() else "-" for character in target).strip("-")

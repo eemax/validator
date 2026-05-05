@@ -113,6 +113,50 @@ def test_validate_and_report_default_to_reconstruction_check(tmp_path, monkeypat
     assert summary_path.is_file()
 
 
+def test_validate_and_report_can_use_private_target_hooks(tmp_path, monkeypatch) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("CENTRIC_CONFIG_DIR", str(config_dir))
+    monkeypatch.chdir(tmp_path)
+    (config_dir / "reconstruction.py").write_text(
+        """
+from pathlib import Path
+
+def validate_projected_products(target, payloads, *, rules=None):
+    payloads = list(payloads)
+    return {
+        "rule_set_version": f"{target}-rules",
+        "total_products": len(payloads),
+        "ready_products": len(payloads),
+        "readiness_percent": 100.0,
+        "results": [],
+    }
+
+def report_validation_results(target, validation_result, output_dir):
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    Path(output_dir, "summary.txt").write_text(
+        f"{target}:{validation_result['total_products']}",
+        encoding="utf-8",
+    )
+""",
+        encoding="utf-8",
+    )
+    input_path = tmp_path / "data" / "results" / "packaging-products.jsonl"
+    input_path.parent.mkdir(parents=True)
+    input_path.write_text(json.dumps({"style_id": "S1"}) + "\n", encoding="utf-8")
+
+    validate_result = CliRunner().invoke(app, ["validate", "--target", "packaging"])
+    report_result = CliRunner().invoke(app, ["report", "--target", "packaging"])
+
+    assert validate_result.exit_code == 0
+    assert "Validated 1 records: 1 ready" in validate_result.output
+    assert (tmp_path / "data" / "results" / "packaging-results.json").is_file()
+    assert report_result.exit_code == 0
+    assert (tmp_path / "reports" / "packaging" / "summary.txt").read_text(
+        encoding="utf-8"
+    ) == "packaging:1"
+
+
 def test_pipeline_requires_explicit_target(tmp_path) -> None:
     result = CliRunner().invoke(app, ["pipeline", "--raw-dir", str(tmp_path / "raw")])
 

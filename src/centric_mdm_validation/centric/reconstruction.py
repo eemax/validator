@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 from collections.abc import Iterable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -62,6 +64,25 @@ class ProjectionFunction(Protocol):
         target: str,
         reconstructed_products: Iterable[ReconstructedProduct],
     ) -> Iterable[BaseModel | Mapping[str, Any]]: ...
+
+
+class ValidationFunction(Protocol):
+    def __call__(
+        self,
+        target: str,
+        payloads: Iterable[BaseModel | Mapping[str, Any]],
+        *,
+        rules: Path | None = None,
+    ) -> BaseModel | Mapping[str, Any]: ...
+
+
+class ReportFunction(Protocol):
+    def __call__(
+        self,
+        target: str,
+        validation_result: BaseModel | Mapping[str, Any],
+        output_dir: Path,
+    ) -> None: ...
 
 
 def reconstruct_master_products_from_records(
@@ -154,6 +175,59 @@ def project_master_products(
     )
 
 
+def validate_projected_products(
+    target: str,
+    payloads: Iterable[BaseModel | Mapping[str, Any]],
+    *,
+    rules: Path | None = None,
+    reconstruction_path: Path | None = None,
+) -> BaseModel | Mapping[str, Any]:
+    """Validate target payloads with a private validation hook."""
+
+    module = load_private_reconstruction_module(reconstruction_path)
+    validation = getattr(module, "validate_projected_products", None) if module else None
+    if callable(validation):
+        return validation(target, payloads, rules=rules)
+
+    raise ValueError(
+        f"Private validation required for target {target!r}. Define "
+        "validate_projected_products(target, payloads, *, rules=None) "
+        f"in {RECONSTRUCTION_CONFIG_PATH}."
+    )
+
+
+def report_validation_results(
+    target: str,
+    validation_result: BaseModel | Mapping[str, Any],
+    output_dir: Path,
+    *,
+    reconstruction_path: Path | None = None,
+) -> None:
+    """Write target reports with a private report hook."""
+
+    module = load_private_reconstruction_module(reconstruction_path)
+    report = getattr(module, "report_validation_results", None) if module else None
+    if callable(report):
+        report(target, validation_result, output_dir)
+        return
+
+    raise ValueError(
+        f"Private reporting required for target {target!r}. Define "
+        "report_validation_results(target, validation_result, output_dir) "
+        f"in {RECONSTRUCTION_CONFIG_PATH}."
+    )
+
+
+def has_private_validation_hook(*, reconstruction_path: Path | None = None) -> bool:
+    module = load_private_reconstruction_module(reconstruction_path)
+    return callable(getattr(module, "validate_projected_products", None)) if module else False
+
+
+def has_private_report_hook(*, reconstruction_path: Path | None = None) -> bool:
+    module = load_private_reconstruction_module(reconstruction_path)
+    return callable(getattr(module, "report_validation_results", None)) if module else False
+
+
 def load_private_reconstruction_module(path: Path | None = None) -> Any | None:
     resolved_path = resolve_reconstruction_path(path)
     if resolved_path is None:
@@ -164,7 +238,13 @@ def load_private_reconstruction_module(path: Path | None = None) -> Any | None:
         raise ValueError(f"Could not load reconstruction module: {resolved_path}")
 
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module_dir = str(resolved_path.parent)
+    sys.path.insert(0, module_dir)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        with suppress(ValueError):
+            sys.path.remove(module_dir)
     return module
 
 

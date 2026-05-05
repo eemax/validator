@@ -120,9 +120,35 @@ schema. These views are the intended boundary for letting DuckDB handle set-base
 joins, and affected-product discovery while private Python reconstruction handles proprietary
 product semantics.
 
-The detailed reconstruction and target projections are proprietary. They should live outside the
-public repo and be resolved from `CENTRIC_CONFIG_DIR/reconstruction.py` or
-`.local/reconstruction.py`. The private hooks are:
+The detailed reconstruction, target projections, target validation, and target reports are
+proprietary. They should live outside the public repo and be resolved through
+`CENTRIC_CONFIG_DIR/reconstruction.py` or `.local/reconstruction.py`. Keep that file as a small
+registry and split implementation behind it, for example:
+
+```text
+CENTRIC_CONFIG_DIR/
+  reconstruction.py
+  reconstructors/
+    check.py
+  projections/
+    dpp.py
+    packaging.py
+    erp_item_master.py
+  validation/
+    dpp.py
+    packaging.py
+    erp_item_master.py
+  reports/
+    dpp.py
+    packaging.py
+    erp_item_master.py
+  common/
+    refs.py
+    indexes.py
+```
+
+The public loader only imports the private `reconstruction.py` entrypoint. That entrypoint can
+route to private modules using these hooks:
 
 ```python
 def reconstruct_master_products(records_by_endpoint):
@@ -131,13 +157,23 @@ def reconstruct_master_products(records_by_endpoint):
 
 def project_reconstructed_products(target, reconstructed_products):
     ...
+
+
+def validate_projected_products(target, payloads, *, rules=None):
+    ...
+
+
+def report_validation_results(target, validation_result, output_dir):
+    ...
 ```
 
 `reconstruct` writes compact reconstruction state into DuckDB tables such as
 `reconstructed_products`, `reconstruction_source_refs`, and `reconstruction_warnings`, then
 materializes either the default `check` output or the requested private target contract. The public
 fallback only builds a style-only placeholder check. All target projections other than `check`,
-including `dpp`, require a private `project_reconstructed_products` hook.
+including `dpp`, require a private `project_reconstructed_products` hook. Non-check target
+validation/reporting can use private hooks; `dpp` still has the public readiness validator as a
+fallback.
 
 ## Create DPP Reports
 

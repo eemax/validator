@@ -1,10 +1,15 @@
 import pytest
 
 from centric_mdm_validation.centric.reconstruction import (
+    has_private_report_hook,
+    has_private_validation_hook,
     inspect_reconstruction_runtime,
+    load_private_reconstruction_module,
     project_master_products,
     reconstruct_master_products_from_records,
+    report_validation_results,
     resolve_reconstruction_path,
+    validate_projected_products,
 )
 
 
@@ -141,3 +146,66 @@ def test_resolve_reconstruction_path_prefers_explicit_then_config_dir(
 
     assert resolve_reconstruction_path(explicit) == explicit
     assert resolve_reconstruction_path() == config_path
+
+
+def test_private_reconstruction_module_can_import_split_sibling_modules(tmp_path) -> None:
+    module_path = tmp_path / "reconstruction.py"
+    helpers = tmp_path / "helpers"
+    helpers.mkdir()
+    (helpers / "__init__.py").write_text("", encoding="utf-8")
+    (helpers / "registry.py").write_text(
+        """
+VALUE = "loaded"
+""",
+        encoding="utf-8",
+    )
+    module_path.write_text(
+        """
+from helpers.registry import VALUE
+
+def marker():
+    return VALUE
+""",
+        encoding="utf-8",
+    )
+
+    module = load_private_reconstruction_module(module_path)
+
+    assert module.marker() == "loaded"
+
+
+def test_private_validation_and_report_hooks_are_resolved(tmp_path) -> None:
+    module_path = tmp_path / "reconstruction.py"
+    report_dir = tmp_path / "reports"
+    module_path.write_text(
+        """
+from pathlib import Path
+
+def validate_projected_products(target, payloads, *, rules=None):
+    return {
+        "rule_set_version": f"{target}-rules",
+        "total_products": len(list(payloads)),
+        "ready_products": 1,
+        "readiness_percent": 50.0,
+        "results": [],
+    }
+
+def report_validation_results(target, validation_result, output_dir):
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    Path(output_dir, f"{target}.txt").write_text(str(validation_result["total_products"]))
+""",
+        encoding="utf-8",
+    )
+
+    assert has_private_validation_hook(reconstruction_path=module_path) is True
+    assert has_private_report_hook(reconstruction_path=module_path) is True
+
+    run = validate_projected_products(
+        "packaging",
+        [{"style_id": "S1"}, {"style_id": "S2"}],
+        reconstruction_path=module_path,
+    )
+    report_validation_results("packaging", run, report_dir, reconstruction_path=module_path)
+
+    assert run["total_products"] == 2
+    assert (report_dir / "packaging.txt").read_text(encoding="utf-8") == "2"

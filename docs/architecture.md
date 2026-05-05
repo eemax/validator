@@ -59,12 +59,37 @@ committed to the public repo. The reconstruction loader resolves private logic i
 2. `CENTRIC_CONFIG_DIR/reconstruction.py`.
 3. `.local/reconstruction.py`.
 
-That private module is expected to define `reconstruct_master_products(records_by_endpoint)` for
-style relationship reconstruction and, for non-check targets,
-`project_reconstructed_products(target, reconstructed_products)`. It owns endpoint relationships and
-target assembly rules, such as how BOM rows attach to styles, how current BOM revisions are
-selected, which material/supplier/factory relationships feed DPP attributes, and how affected style
-IDs are derived from deltas.
+That private entrypoint is expected to stay small and route into split private modules:
+
+```text
+CENTRIC_CONFIG_DIR/
+  reconstruction.py
+  reconstructors/
+  projections/
+  validation/
+  reports/
+  common/
+```
+
+The public loader only imports `reconstruction.py`. That module can define:
+
+```python
+def reconstruct_master_products(records_by_endpoint):
+    ...
+
+def project_reconstructed_products(target, reconstructed_products):
+    ...
+
+def validate_projected_products(target, payloads, *, rules=None):
+    ...
+
+def report_validation_results(target, validation_result, output_dir):
+    ...
+```
+
+It owns endpoint relationships and target assembly rules, such as how BOM rows attach to styles,
+how current BOM revisions are selected, which material/supplier/factory relationships feed target
+attributes, and how affected style IDs are derived from deltas.
 
 The initial store implementation uses one generic DuckDB table for current endpoint records:
 
