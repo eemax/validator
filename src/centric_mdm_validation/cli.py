@@ -18,8 +18,7 @@ from centric_mdm_validation.centric.store import (
     IngestFileProgress,
     discover_raw_files,
     ingest_raw_dir,
-    rebuild_master_reconstruction,
-    write_projected_products_from_master,
+    run_reconstruction_coverage_check,
     write_target_reconstruction,
 )
 from centric_mdm_validation.io import read_json_records, write_json
@@ -46,7 +45,6 @@ RulesOption = Annotated[
 ]
 RULES_CONFIG_PATH = Path("rules/dpp-readiness.yml")
 DEFAULT_DB_PATH = Path("data/centric.duckdb")
-DEFAULT_RECONSTRUCTION_CHECK_PATH = Path("data/results/reconstruction-check.jsonl")
 DEFAULT_RECONSTRUCTION_CHECK_RESULTS_PATH = Path("data/results/reconstruction-check-results.json")
 DEFAULT_PROJECTED_PRODUCTS_PATH = Path("data/results/projected-products.jsonl")
 DEFAULT_DPP_RESULTS_PATH = Path("data/results/dpp-readiness-results.json")
@@ -65,7 +63,7 @@ class PipelineTarget:
 PIPELINE_TARGETS = {
     "check": PipelineTarget(
         name="check",
-        reconstructed_output=DEFAULT_RECONSTRUCTION_CHECK_PATH,
+        reconstructed_output=DEFAULT_RECONSTRUCTION_CHECK_RESULTS_PATH,
         validation_output=DEFAULT_RECONSTRUCTION_CHECK_RESULTS_PATH,
         report_output_dir=DEFAULT_RECONSTRUCTION_CHECK_REPORT_DIR,
     ),
@@ -83,7 +81,7 @@ PIPELINE_TARGETS = {
     ),
 }
 PIPELINE_TARGET_HELP = (
-    "Required projection target to validate/report. "
+    "Required target to reconstruct, validate, and report. "
     f"Registered targets: {', '.join(PIPELINE_TARGETS)}."
 )
 
@@ -131,18 +129,18 @@ def reconstruct(
     ] = DEFAULT_DB_PATH,
     output: Annotated[
         Path | None,
-        typer.Option("--output", "-o", help="Output JSONL."),
+        typer.Option("--output", "-o", help="Output JSON or JSONL."),
     ] = None,
     target: Annotated[
         str,
         typer.Option("--target", "-t", help="Projection target to materialize."),
     ] = "check",
 ) -> None:
-    """Build reconstruction state and materialize a compact check or target projection."""
+    """Build aggregate check state or materialize a target reconstruction."""
 
     output_path = output or _default_reconstruct_output(target)
-    _echo_reconstruction_runtime(target)
     if target != "check":
+        _echo_reconstruction_runtime(target)
         _echo_step(f"Reconstruct: building {target} records from endpoint state in {db}")
         payloads = write_target_reconstruction(
             db,
@@ -152,19 +150,10 @@ def reconstruct(
         _echo_done(f"Wrote {len(payloads)} {target} records to {output_path}")
         return
 
-    _echo_step(f"Reconstruct: building style relationship state from {db}")
-    master_result = rebuild_master_reconstruction(db)
-    _echo_done(
-        f"Reconstruction stored {master_result.products_reconstructed} styles "
-        f"({master_result.source_refs} source refs, {master_result.warnings} warnings)"
-    )
-    _echo_step(f"Reconstruct: writing target {target!r} into {output_path}")
-    payloads = write_projected_products_from_master(
-        db,
-        output_path,
-        target=target,
-    )
-    _echo_done(f"Wrote {len(payloads)} {target} records to {output_path}")
+    _echo_step(f"Check: measuring aggregate endpoint coverage from {db}")
+    run = run_reconstruction_coverage_check(db)
+    _write_validation_result(output_path, run)
+    _echo_done(f"Wrote aggregate check results to {output_path}")
 
 
 @app.command()
@@ -179,7 +168,7 @@ def pipeline(
     ] = DEFAULT_DB_PATH,
     projected_output: Annotated[
         Path | None,
-        typer.Option("--projected-output", help="Projected product JSONL."),
+        typer.Option("--projected-output", help="Reconstructed target JSONL."),
     ] = None,
     target: Annotated[
         str,
@@ -206,6 +195,24 @@ def pipeline(
     validation_output_path = validation_output or target_config.validation_output
     _echo_step("Pipeline: starting ingest")
     ingest_result = _run_ingest(raw_dir=raw_dir, db=db, schema=schema)
+    if target == "check":
+        _echo_step("Pipeline: checking aggregate endpoint coverage")
+        run = run_reconstruction_coverage_check(db)
+        _echo_step(f"Pipeline: writing check results to {validation_output_path}")
+        _write_validation_result(validation_output_path, run)
+        report_path = report_output_dir or target_config.report_output_dir
+        _echo_step(f"Pipeline: writing aggregate check report to {report_path}")
+        _write_report_for_target(target, run, report_path)
+        summary = run.get("summary", {})
+        _echo_done(
+            f"Check complete: {ingest_result.applied_files} raw files applied "
+            f"({ingest_result.skipped_files} skipped), "
+            f"{summary.get('declared_refs', 0)} refs checked, "
+            f"{summary.get('coverage_percent', 0.0)}% coverage. "
+            f"Results: {validation_output_path}"
+        )
+        return
+
     _echo_reconstruction_runtime(target)
     _echo_step(f"Pipeline: building {target} records from endpoint state")
     projected_payloads = _write_reconstruction_for_target(
@@ -213,7 +220,7 @@ def pipeline(
         output=projected_output_path,
         target=target,
     )
-    _echo_done(f"Projected {len(projected_payloads)} products into {projected_output_path}")
+    _echo_done(f"Reconstructed {len(projected_payloads)} products into {projected_output_path}")
     _echo_step(f"Pipeline: validating {len(projected_payloads)} products")
     run = _validate_records(projected_payloads, rules, target=target)
     _echo_step(f"Pipeline: writing validation results to {validation_output_path}")
@@ -255,12 +262,17 @@ def validate(
     run = _validate(input_file, rules, target=target)
     _echo_step(f"Validate: writing results to {output_file}")
     _write_validation_result(output_file, run)
+    if target == "check" and isinstance(run, dict):
+        summary = run.get("summary", {})
+        _echo_done(
+            f"Checked {summary.get('declared_refs', 0)} refs: "
+            f"{summary.get('seen_refs', 0)} seen "
+            f"({summary.get('coverage_percent', 0.0)}%). Results: {output_file}"
+        )
+        return
     total, ready = _validation_counts(run)
     readiness = _readiness_percent(run)
-    _echo_done(
-        f"Validated {total} records: {ready} ready "
-        f"({readiness}%). Results: {output_file}"
-    )
+    _echo_done(f"Validated {total} records: {ready} ready ({readiness}%). Results: {output_file}")
 
 
 @app.command()
@@ -287,6 +299,13 @@ def report(
     run = _validate(input_file, rules, target=target)
     _echo_step(f"Report: writing report files to {output_path}")
     _write_report_for_target(target, run, output_path)
+    if target == "check" and isinstance(run, dict):
+        summary = run.get("summary", {})
+        _echo_done(
+            f"Wrote check coverage report for {summary.get('declared_refs', 0)} refs "
+            f"into {output_path}"
+        )
+        return
     total, _ = _validation_counts(run)
     _echo_done(f"Wrote {target} reports for {total} records into {output_path}")
 
@@ -353,18 +372,17 @@ def _validate(input_path: Path, rules: Path | None, *, target: str):
 
 def _write_reconstruction_for_target(*, db: Path, output: Path, target: str):
     if target == "check":
-        master_result = rebuild_master_reconstruction(db)
-        _echo_done(
-            f"Reconstruction stored {master_result.products_reconstructed} styles "
-            f"({master_result.source_refs} source refs, {master_result.warnings} warnings)"
-        )
-        return write_projected_products_from_master(db, output, target=target)
+        run = run_reconstruction_coverage_check(db)
+        _write_validation_result(output, run)
+        return [run]
 
     return write_target_reconstruction(db, output, target=target)
 
 
 def _validate_records(records, rules: Path | None, *, target: str):
     if target == "check":
+        if len(records) == 1 and "relationship_coverage" in records[0]:
+            return records[0]
         payloads = [ReconstructionCheckPayload.model_validate(record) for record in records]
         return ReconstructionCheckValidator().validate_many(payloads)
     if has_private_validation_hook():

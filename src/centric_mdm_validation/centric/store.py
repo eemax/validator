@@ -5,7 +5,7 @@ import hashlib
 import json
 import os
 import tempfile
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -53,6 +53,15 @@ class MasterReconstructionResult:
     products_reconstructed: int
     source_refs: int
     warnings: int
+
+
+@dataclass(frozen=True)
+class ReferenceCoverageRule:
+    relationship: str
+    source_endpoint: str
+    source_fields: tuple[str, ...]
+    target_endpoint: str
+    target_fields: tuple[str, ...] = ("id",)
 
 
 @dataclass(frozen=True)
@@ -287,6 +296,52 @@ def reconstruct_products_for_target(
         initialize_store(conn)
         records_by_endpoint = load_current_endpoint_records(conn)
     return reconstruct_target_records(target, records_by_endpoint)
+
+
+def run_reconstruction_coverage_check(db_path: Path) -> dict[str, Any]:
+    with duckdb.connect(str(db_path)) as conn:
+        initialize_store(conn)
+        records_by_endpoint = load_current_endpoint_records(conn)
+    return build_reconstruction_coverage_check(records_by_endpoint)
+
+
+def build_reconstruction_coverage_check(
+    records_by_endpoint: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    endpoint_rows = _endpoint_coverage_rows(records_by_endpoint)
+    relationship_rows = [
+        _relationship_coverage_row(rule, records_by_endpoint) for rule in _COVERAGE_RULES
+    ]
+    unresolved_rows = _unresolved_ref_rows(relationship_rows)
+    issue_rows = _coverage_issue_rows(relationship_rows, endpoint_rows)
+    declared_refs = sum(row["declared_refs"] for row in relationship_rows)
+    seen_refs = sum(row["seen_refs"] for row in relationship_rows)
+    missing_refs = sum(row["missing_refs"] for row in relationship_rows)
+    invalid_refs = sum(row["invalid_refs"] for row in relationship_rows)
+    coverage_percent = round((seen_refs / declared_refs) * 100, 2) if declared_refs else 100.0
+    style_count = len(records_by_endpoint.get("styles", []))
+    return {
+        "context": "reconstruction_check",
+        "rule_set_version": "reconstruction-check-coverage-v1",
+        "total_products": declared_refs,
+        "ready_products": seen_refs,
+        "readiness_percent": coverage_percent,
+        "summary": {
+            "styles": style_count,
+            "endpoints": len(endpoint_rows),
+            "relationships_checked": len(relationship_rows),
+            "declared_refs": declared_refs,
+            "seen_refs": seen_refs,
+            "missing_refs": missing_refs,
+            "invalid_refs": invalid_refs,
+            "coverage_percent": coverage_percent,
+        },
+        "relationship_coverage": relationship_rows,
+        "endpoint_coverage": endpoint_rows,
+        "unresolved_refs": unresolved_rows,
+        "issue_counts": issue_rows,
+        "results": [],
+    }
 
 
 def write_master_reconstruction(
@@ -662,12 +717,216 @@ _MASTER_RECORD_BUCKETS = {
     "suppliers",
 }
 
-def _compact_master_graph(graph: dict[str, Any]) -> dict[str, Any]:
+
+_COVERAGE_RULES = (
+    ReferenceCoverageRule(
+        relationship="style_colorways",
+        source_endpoint="styles",
+        source_fields=(
+            "product_colors",
+            "active_colorways",
+            "sample_colorways",
+            "production_colorways",
+        ),
+        target_endpoint="colorways",
+    ),
+    ReferenceCoverageRule(
+        relationship="style_sizes",
+        source_endpoint="styles",
+        source_fields=("product_sizes", "size_set_sample_sizes"),
+        target_endpoint="sizes",
+    ),
+    ReferenceCoverageRule(
+        relationship="style_seasons",
+        source_endpoint="styles",
+        source_fields=("parent_season", "original_season"),
+        target_endpoint="seasons",
+        target_fields=("id", "code"),
+    ),
+    ReferenceCoverageRule(
+        relationship="style_bom_master",
+        source_endpoint="styles",
+        source_fields=("authority_bom",),
+        target_endpoint="boms",
+        target_fields=("id", "nwg_product_bom_rev_parent_bom_id"),
+    ),
+    ReferenceCoverageRule(
+        relationship="bom_rows",
+        source_endpoint="boms",
+        source_fields=("items",),
+        target_endpoint="bomrows",
+    ),
+    ReferenceCoverageRule(
+        relationship="bom_materials",
+        source_endpoint="boms",
+        source_fields=("bom_main_materials", "bom_materials"),
+        target_endpoint="materials",
+    ),
+    ReferenceCoverageRule(
+        relationship="bomrow_materials",
+        source_endpoint="bomrows",
+        source_fields=("actual", "original"),
+        target_endpoint="materials",
+    ),
+    ReferenceCoverageRule(
+        relationship="material_default_quotes",
+        source_endpoint="materials",
+        source_fields=("default_quote",),
+        target_endpoint="supplierquotes",
+        target_fields=("id", "master"),
+    ),
+    ReferenceCoverageRule(
+        relationship="supplier_quote_factories",
+        source_endpoint="supplierquotes",
+        source_fields=("quote_factory",),
+        target_endpoint="factories",
+    ),
+    ReferenceCoverageRule(
+        relationship="factory_suppliers",
+        source_endpoint="factories",
+        source_fields=("suppliers",),
+        target_endpoint="suppliers",
+    ),
+)
+
+
+def _endpoint_coverage_rows(
+    records_by_endpoint: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    return [
+        {"endpoint": endpoint, "records": len(records)}
+        for endpoint, records in sorted(records_by_endpoint.items())
+    ]
+
+
+def _relationship_coverage_row(
+    rule: ReferenceCoverageRule,
+    records_by_endpoint: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    source_records = records_by_endpoint.get(rule.source_endpoint, [])
+    target_ids = _target_ids(records_by_endpoint.get(rule.target_endpoint, []), rule.target_fields)
+    declared_refs = 0
+    seen_refs = 0
+    missing_refs = 0
+    invalid_refs = 0
+    source_records_with_refs = 0
+    source_records_with_missing_refs = 0
+    status_counts: Counter[str] = Counter()
+    for record in source_records:
+        refs = _unique_refs(
+            ref for field in rule.source_fields for ref in _refs_from_value(record.get(field))
+        )
+        if not refs:
+            continue
+        source_records_with_refs += 1
+        record_missing = False
+        for ref in refs:
+            declared_refs += 1
+            if not _is_valid_centric_ref(ref):
+                invalid_refs += 1
+                status_counts["invalid_ref"] += 1
+                record_missing = True
+                continue
+            if ref in target_ids:
+                seen_refs += 1
+                continue
+            missing_refs += 1
+            status_counts["not_seen"] += 1
+            record_missing = True
+        if record_missing:
+            source_records_with_missing_refs += 1
+    coverage_percent = round((seen_refs / declared_refs) * 100, 2) if declared_refs else 100.0
     return {
-        key: value
-        for key, value in graph.items()
-        if key not in _MASTER_RECORD_BUCKETS
+        "relationship": rule.relationship,
+        "source_endpoint": rule.source_endpoint,
+        "target_endpoint": rule.target_endpoint,
+        "source_records": len(source_records),
+        "source_records_with_refs": source_records_with_refs,
+        "source_records_with_missing_refs": source_records_with_missing_refs,
+        "declared_refs": declared_refs,
+        "seen_refs": seen_refs,
+        "missing_refs": missing_refs,
+        "invalid_refs": invalid_refs,
+        "coverage_percent": coverage_percent,
+        "unresolved_status_counts": dict(sorted(status_counts.items())),
     }
+
+
+def _target_ids(records: list[dict[str, Any]], fields: tuple[str, ...]) -> set[str]:
+    ids: set[str] = set()
+    for record in records:
+        for field in fields:
+            ids.update(_refs_from_value(record.get(field)))
+    return ids
+
+
+def _unresolved_ref_rows(relationship_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = []
+    for row in relationship_rows:
+        for status, count in row.get("unresolved_status_counts", {}).items():
+            rows.append(
+                {
+                    "relationship": row["relationship"],
+                    "target_endpoint": row["target_endpoint"],
+                    "status": status,
+                    "count": count,
+                }
+            )
+    return rows
+
+
+def _coverage_issue_rows(
+    relationship_rows: list[dict[str, Any]],
+    endpoint_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    counts: Counter[tuple[str, str, str]] = Counter()
+    for row in relationship_rows:
+        if row["missing_refs"]:
+            counts[("REFERENCED_RECORD_NOT_SEEN", "error", row["relationship"])] += row[
+                "missing_refs"
+            ]
+        if row["invalid_refs"]:
+            counts[("INVALID_REFERENCE_VALUE", "error", row["relationship"])] += row["invalid_refs"]
+    for row in endpoint_rows:
+        if row["records"] == 0:
+            counts[("ENDPOINT_EMPTY", "warning", row["endpoint"])] += 1
+    return [
+        {"code": code, "severity": severity, "bucket": bucket, "count": count}
+        for (code, severity, bucket), count in sorted(counts.items())
+    ]
+
+
+def _refs_from_value(value: Any) -> list[str]:
+    refs: list[str] = []
+    if isinstance(value, str):
+        ref = value.strip()
+        if ref and ref != "centric:":
+            refs.append(ref)
+    elif isinstance(value, dict):
+        for item in value.values():
+            refs.extend(_refs_from_value(item))
+    elif isinstance(value, list):
+        for item in value:
+            refs.extend(_refs_from_value(item))
+    return refs
+
+
+def _unique_refs(values: Iterable[str]) -> list[str]:
+    output = []
+    seen = set()
+    for value in values:
+        if value not in seen:
+            output.append(value)
+            seen.add(value)
+    return output
+
+
+def _is_valid_centric_ref(value: str) -> bool:
+    return len(value) >= 2 and value[0] == "C" and value[1].isdigit()
+
+
+def _compact_master_graph(graph: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in graph.items() if key not in _MASTER_RECORD_BUCKETS}
 
 
 def _load_reconstruction_warnings(

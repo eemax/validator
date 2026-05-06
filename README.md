@@ -3,7 +3,7 @@
 Focused validator for Centric product data, starting with DPP readiness.
 
 The project fetches or receives Centric product data, ingests it into a local DuckDB
-reconstruction store, writes a compact reconstruction check for relationship coverage, projects
+reconstruction store, runs an aggregate reconstruction coverage check, materializes
 target-specific validation payloads, runs governed rules, and creates readiness reports.
 
 ## Current State
@@ -11,14 +11,14 @@ target-specific validation payloads, runs governed rules, and creates readiness 
 - Python package managed by `uv`
 - CLI commands: `centric-mdm` and `centric-fetch`
 - YAML-driven DPP readiness rules
-- Pydantic models for projected Centric style payloads
+- Pydantic models for target validation payloads
 - Product-level DPP validation with issue source fields and fix locations
 - CSV, XLSX, and Markdown readiness reports
 - Example payloads and tests
 - Centric API fetcher with pagination, retries, checkpoints, resume, delta mode,
   count preflight, ID integrity checks, and structured logs
 - DuckDB-backed ingest/reconstruction path for applying full and delta raw endpoint files
-- Default reconstruction check validation/reporting for missing and unresolved relationships
+- Default reconstruction check reporting for aggregate endpoint/reference coverage
 
 ## Install
 
@@ -28,8 +28,8 @@ uv sync --dev
 
 ## Default Reconstruction Check
 
-The no-argument command path is the reconstruction check. It is a compact status artifact for
-debugging relationship coverage, not a product payload:
+The no-argument command path is the reconstruction check. It is an aggregate store coverage
+status, not a product payload:
 
 ```bash
 uv run centric-mdm reconstruct
@@ -39,21 +39,21 @@ uv run centric-mdm report
 
 Defaults:
 
-- `reconstruct` writes `data/results/reconstruction-check.jsonl`
-- `validate` reads that file and writes `data/results/reconstruction-check-results.json`
+- `reconstruct` writes `data/results/reconstruction-check-results.json`
+- `validate` reads that file and writes it back after checking the aggregate result shape
 - `report` reads that file and writes `reports/reconstruction-check/`
 
-Each check row is one style with relationship IDs, relationship/resolved-record counts,
-applicability mappings, unresolved refs, and reconstruction warnings. Full endpoint records stay
-in DuckDB instead of being duplicated into the JSONL output.
+The check result contains counts only: endpoint record counts, declared refs, seen refs, missing
+refs, invalid refs, relationship coverage, unresolved ref counts, and issue counts. Full endpoint
+records stay in DuckDB instead of being duplicated into check output.
 
-## Validate DPP Payloads
+## Validate Public DPP Fixture
 
 ```bash
 uv run centric-mdm validate \
   --target dpp \
   --input tests/fixtures/projected-products.json \
-  --rules .local/rules/dpp-readiness.yml \
+  --rules tests/fixtures/dpp-readiness.yml \
   --output data/results/dpp-readiness-results.json
 ```
 
@@ -83,26 +83,27 @@ uv run centric-mdm ingest \
   --db data/centric.duckdb
 ```
 
-Build the compact reconstruction check from the current DuckDB state:
+Build the aggregate reconstruction check from the current DuckDB state:
 
 ```bash
 uv run centric-mdm reconstruct \
   --db data/centric.duckdb \
-  --output data/results/reconstruction-check.jsonl
+  --output data/results/reconstruction-check-results.json
 ```
 
-Use explicit targets such as `--target dpp`, `--target packaging`, or
-`--target erp-item-master` for private target-specific projections.
+Use explicit targets for target-specific reconstruction. Current targets are `check`, `dpp`,
+and `md`; `packaging` is expected later.
 
-Or run ingest, reconstruct, and validation together:
+Or run ingest, reconstruct, validation, and reporting together for an explicit target:
 
 ```bash
 uv run centric-mdm pipeline \
   --raw-dir data/raw \
   --db data/centric.duckdb \
   --target dpp \
-  --projected-output data/results/projected-products.jsonl \
-  --validation-output data/results/dpp-readiness-results.json
+  --projected-output data/results/dpp-products.jsonl \
+  --validation-output data/results/dpp-readiness-results.json \
+  --report-output-dir reports/dpp-readiness
 ```
 
 Endpoint merge behavior lives in `config/endpoint-schema.yml`. Each endpoint can define its
@@ -120,28 +121,26 @@ schema. These views are the intended boundary for letting DuckDB handle set-base
 joins, and affected-product discovery while private Python reconstruction handles proprietary
 product semantics.
 
-The detailed reconstruction, target projections, target validation, and target reports are
-proprietary. They should live outside the public repo and be resolved through
-`CENTRIC_CONFIG_DIR/reconstruction.py` or `.local/reconstruction.py`. Keep that file as a small
-registry and split implementation behind it, for example:
+The detailed target reconstruction, validation, and reports are proprietary. They should live
+outside the public repo and be resolved through `CENTRIC_CONFIG_DIR/reconstruction.py` or
+`.local/reconstruction.py`. Keep that file as a small registry and split implementation behind
+it, for example:
 
 ```text
 CENTRIC_CONFIG_DIR/
   reconstruction.py
   reconstructors/
-    check.py
-  projections/
     dpp.py
-    packaging.py
-    erp_item_master.py
-  validation/
-    dpp.py
-    packaging.py
-    erp_item_master.py
+    md.py
+    packaging.py  # later
   reports/
     dpp.py
-    packaging.py
-    erp_item_master.py
+    md.py
+    packaging.py  # later
+  validation/
+    dpp.py
+    md.py
+    packaging.py  # later
   common/
     refs.py
     indexes.py
@@ -151,11 +150,7 @@ The public loader only imports the private `reconstruction.py` entrypoint. That 
 route to private modules using these hooks:
 
 ```python
-def reconstruct_master_products(records_by_endpoint):
-    ...
-
-
-def project_reconstructed_products(target, reconstructed_products):
+def reconstruct_target_records(target, records_by_endpoint):
     ...
 
 
@@ -167,30 +162,59 @@ def report_validation_results(target, validation_result, output_dir):
     ...
 ```
 
-`reconstruct` writes compact reconstruction state into DuckDB tables such as
-`reconstructed_products`, `reconstruction_source_refs`, and `reconstruction_warnings`, then
-materializes either the default `check` output or the requested private target contract. The public
-fallback only builds a style-only placeholder check. All target projections other than `check`,
-including `dpp`, require a private `project_reconstructed_products` hook. Non-check target
-validation/reporting can use private hooks; `dpp` still has the public readiness validator as a
-fallback.
+`reconstruct` either writes the default aggregate `check` result or materializes the requested
+private target contract directly from current DuckDB endpoint state. All non-check targets require
+a private `reconstruct_target_records` hook. Non-check target validation/reporting can use private
+hooks; `dpp` still has the public readiness validator as a fallback.
+
+## Current Targets
+
+- `check`: public aggregate endpoint/reference coverage check.
+- `dpp`: private DPP reconstruction, validation, and readiness reporting.
+- `md`: private merchandise data reconstruction, validation, and readiness reporting.
+- `packaging`: planned future private target.
 
 ## Create DPP Reports
 
 ```bash
+uv run centric-mdm reconstruct --target dpp --output data/results/dpp-products.jsonl
+uv run centric-mdm validate \
+  --target dpp \
+  --input data/results/dpp-products.jsonl \
+  --output data/results/dpp-readiness-results.json
 uv run centric-mdm report \
   --target dpp \
-  --input tests/fixtures/projected-products.json \
-  --rules .local/rules/dpp-readiness.yml \
+  --input data/results/dpp-products.jsonl \
   --output-dir reports/dpp-readiness
 ```
 
 Outputs:
 
-- `reports/dpp-readiness/dpp-readiness-summary.md`
-- `reports/dpp-readiness/dpp-readiness-products.csv`
-- `reports/dpp-readiness/dpp-readiness-issues.csv`
-- `reports/dpp-readiness/dpp-readiness.xlsx`
+- `reports/dpp-readiness/dpp-summary.md`
+- `reports/dpp-readiness/dpp-summary.xlsx`
+- `reports/dpp-readiness/dpp-issues.xlsx`
+
+## Create MD Reports
+
+```bash
+uv run centric-mdm reconstruct --target md --output data/results/md-products.jsonl
+uv run centric-mdm validate \
+  --target md \
+  --input data/results/md-products.jsonl \
+  --output data/results/md-results.json
+uv run centric-mdm report \
+  --target md \
+  --input data/results/md-products.jsonl \
+  --output-dir reports/md-readiness
+```
+
+Outputs:
+
+- `reports/md-readiness/md-summary.md`
+- `reports/md-readiness/md-summary.xlsx`
+- `reports/md-readiness/md-issues.xlsx`
+- `reports/md-readiness/md-season-warnings.xlsx`
+- `reports/md-readiness/md-reference-coverage.xlsx`
 
 ## Fetch Centric Data
 

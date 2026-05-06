@@ -66,36 +66,75 @@ def test_reconstruct_command_defaults_to_check_target(tmp_path, monkeypatch) -> 
 
     assert ingest_result.exit_code == 0
     assert result.exit_code == 0
-    assert "writing target 'check'" in result.output
-    output_path = tmp_path / "data" / "results" / "reconstruction-check.jsonl"
+    assert "Check: measuring aggregate endpoint coverage" in result.output
+    output_path = tmp_path / "data" / "results" / "reconstruction-check-results.json"
     assert output_path.is_file()
     payload = json.loads(output_path.read_text(encoding="utf-8"))
-    assert payload["style_id"] == "S1"
-    assert "relationship_ids" in payload
+    assert payload["summary"]["styles"] == 1
+    assert "relationship_coverage" in payload
 
 
 def test_validate_and_report_default_to_reconstruction_check(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
-    check_path = tmp_path / "data" / "results" / "reconstruction-check.jsonl"
+    check_path = tmp_path / "data" / "results" / "reconstruction-check-results.json"
     check_path.parent.mkdir(parents=True)
     check_path.write_text(
         json.dumps(
             {
-                "style_id": "S1",
-                "relationship_ids": {"style_colorway_ids": ["C1"]},
-                "counts": {
-                    "relationship_ids": {"style_colorway_ids": 1},
-                    "resolved_records": {"colorways": 0},
-                    "unresolved_refs": 0,
-                    "warnings": 0,
+                "context": "reconstruction_check",
+                "rule_set_version": "reconstruction-check-coverage-v1",
+                "total_products": 1,
+                "ready_products": 0,
+                "readiness_percent": 0.0,
+                "summary": {
+                    "styles": 1,
+                    "endpoints": 2,
+                    "relationships_checked": 1,
+                    "declared_refs": 1,
+                    "seen_refs": 0,
+                    "missing_refs": 1,
+                    "invalid_refs": 0,
+                    "coverage_percent": 0.0,
                 },
-                "applicability": {},
-                "unresolved_refs": [],
-                "warnings": [],
+                "relationship_coverage": [
+                    {
+                        "relationship": "style_colorways",
+                        "source_endpoint": "styles",
+                        "target_endpoint": "colorways",
+                        "source_records": 1,
+                        "source_records_with_refs": 1,
+                        "source_records_with_missing_refs": 1,
+                        "declared_refs": 1,
+                        "seen_refs": 0,
+                        "missing_refs": 1,
+                        "invalid_refs": 0,
+                        "coverage_percent": 0.0,
+                    }
+                ],
+                "endpoint_coverage": [
+                    {"endpoint": "styles", "records": 1},
+                    {"endpoint": "colorways", "records": 0},
+                ],
+                "unresolved_refs": [
+                    {
+                        "relationship": "style_colorways",
+                        "target_endpoint": "colorways",
+                        "status": "not_seen",
+                        "count": 1,
+                    }
+                ],
+                "issue_counts": [
+                    {
+                        "code": "REFERENCED_RECORD_NOT_SEEN",
+                        "severity": "error",
+                        "bucket": "style_colorways",
+                        "count": 1,
+                    }
+                ],
+                "results": [],
             },
             separators=(",", ":"),
-        )
-        + "\n",
+        ),
         encoding="utf-8",
     )
 
@@ -107,9 +146,7 @@ def test_validate_and_report_default_to_reconstruction_check(tmp_path, monkeypat
     assert (tmp_path / "data" / "results" / "reconstruction-check-results.json").is_file()
     assert report_result.exit_code == 0
     assert "reading check records" in report_result.output
-    summary_path = (
-        tmp_path / "reports" / "reconstruction-check" / "reconstruction-check-summary.md"
-    )
+    summary_path = tmp_path / "reports" / "reconstruction-check" / "reconstruction-check-summary.md"
     assert summary_path.is_file()
 
 
@@ -189,10 +226,10 @@ def test_pipeline_supports_public_check_target(tmp_path, monkeypatch) -> None:
     )
 
     assert result.exit_code == 0
-    assert "Pipeline: building check records" in result.output
+    assert "Pipeline: checking aggregate endpoint coverage" in result.output
     assert "Validated" not in result.output
-    assert (tmp_path / "data" / "results" / "reconstruction-check.jsonl").is_file()
     assert (tmp_path / "data" / "results" / "reconstruction-check-results.json").is_file()
+    assert (tmp_path / "reports" / "reconstruction-check" / "reconstruction-check.xlsx").is_file()
 
 
 def test_pipeline_uses_registry_defaults_for_private_targets(tmp_path, monkeypatch) -> None:
