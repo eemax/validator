@@ -11,6 +11,24 @@ endpoints:
     delete_field: active
     delete_when: false
     full_snapshot_mode: upsert_only
+  collections:
+    primary_key: id
+    modified_at_fields: [_modified_at]
+    delete_field: active
+    delete_when: false
+    full_snapshot_mode: upsert_only
+  category1s:
+    primary_key: id
+    modified_at_fields: [_modified_at]
+    delete_field: active
+    delete_when: false
+    full_snapshot_mode: upsert_only
+  category2s:
+    primary_key: id
+    modified_at_fields: [_modified_at]
+    delete_field: active
+    delete_when: false
+    full_snapshot_mode: upsert_only
   sizes:
     primary_key: id
     modified_at_fields: [_modified_at]

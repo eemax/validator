@@ -51,6 +51,39 @@ endpoints:
       api_version: v2
       path: count/Colorway
       result_path: $.count
+  - name: collections
+    api_version: v2
+    path: collections
+    skip_param: skip
+    limit_param: limit
+    limit: 50
+    item_path: $
+    count_spec:
+      api_version: v2
+      path: count/Collection
+      result_path: $.count
+  - name: category1s
+    api_version: v2
+    path: category1s
+    skip_param: skip
+    limit_param: limit
+    limit: 50
+    item_path: $
+    count_spec:
+      api_version: v2
+      path: count/Category1
+      result_path: $.count
+  - name: category2s
+    api_version: v2
+    path: category2s
+    skip_param: skip
+    limit_param: limit
+    limit: 50
+    item_path: $
+    count_spec:
+      api_version: v2
+      path: count/Category2
+      result_path: $.count
   - name: sizes
     api_version: v2
     path: product_sizes

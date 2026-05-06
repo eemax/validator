@@ -172,7 +172,7 @@ endpoints:
     }
 
 
-def test_repo_config_fetches_product_sizes_as_sizes(monkeypatch) -> None:
+def test_repo_config_includes_style_reference_endpoints(monkeypatch) -> None:
     monkeypatch.delenv(CONFIG_DIR_ENV_VAR, raising=False)
 
     _, _, endpoints = load_fetcher_settings(Path("config/fetcher.yml"))
@@ -182,14 +182,24 @@ def test_repo_config_fetches_product_sizes_as_sizes(monkeypatch) -> None:
     assert sizes.path == "product_sizes"
     assert sizes.count_spec is not None
     assert sizes.count_spec.path == "count/ProductSize"
+    assert endpoint_by_name["collections"].path == "collections"
+    assert endpoint_by_name["collections"].count_spec is not None
+    assert endpoint_by_name["collections"].count_spec.path == "count/Collection"
+    assert endpoint_by_name["category1s"].path == "category1s"
+    assert endpoint_by_name["category1s"].count_spec is not None
+    assert endpoint_by_name["category1s"].count_spec.path == "count/Category1"
+    assert endpoint_by_name["category2s"].path == "category2s"
+    assert endpoint_by_name["category2s"].count_spec is not None
+    assert endpoint_by_name["category2s"].count_spec.path == "count/Category2"
 
 
-def test_repo_endpoint_schema_includes_sizes() -> None:
+def test_repo_endpoint_schema_includes_style_reference_endpoints() -> None:
     schemas = load_endpoint_schemas(Path("config/endpoint-schema.yml"))
 
-    assert schemas["sizes"].primary_key == "id"
-    assert schemas["sizes"].delete_field == "active"
-    assert schemas["sizes"].full_snapshot_mode == "upsert_only"
+    for endpoint in ("sizes", "collections", "category1s", "category2s"):
+        assert schemas[endpoint].primary_key == "id"
+        assert schemas[endpoint].delete_field == "active"
+        assert schemas[endpoint].full_snapshot_mode == "upsert_only"
 
 
 def test_private_config_path_prefers_explicit_then_config_dir(
