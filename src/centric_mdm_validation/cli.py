@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 
@@ -51,6 +52,40 @@ DEFAULT_PROJECTED_PRODUCTS_PATH = Path("data/results/projected-products.jsonl")
 DEFAULT_DPP_RESULTS_PATH = Path("data/results/dpp-readiness-results.json")
 DEFAULT_RECONSTRUCTION_CHECK_REPORT_DIR = Path("reports/reconstruction-check")
 DEFAULT_DPP_REPORT_DIR = Path("reports/dpp-readiness")
+
+
+@dataclass(frozen=True)
+class PipelineTarget:
+    name: str
+    reconstructed_output: Path
+    validation_output: Path
+    report_output_dir: Path
+
+
+PIPELINE_TARGETS = {
+    "check": PipelineTarget(
+        name="check",
+        reconstructed_output=DEFAULT_RECONSTRUCTION_CHECK_PATH,
+        validation_output=DEFAULT_RECONSTRUCTION_CHECK_RESULTS_PATH,
+        report_output_dir=DEFAULT_RECONSTRUCTION_CHECK_REPORT_DIR,
+    ),
+    "dpp": PipelineTarget(
+        name="dpp",
+        reconstructed_output=DEFAULT_PROJECTED_PRODUCTS_PATH,
+        validation_output=DEFAULT_DPP_RESULTS_PATH,
+        report_output_dir=DEFAULT_DPP_REPORT_DIR,
+    ),
+    "md": PipelineTarget(
+        name="md",
+        reconstructed_output=Path("data/results/md-products.jsonl"),
+        validation_output=Path("data/results/md-results.json"),
+        report_output_dir=Path("reports/md-readiness"),
+    ),
+}
+PIPELINE_TARGET_HELP = (
+    "Required projection target to validate/report. "
+    f"Registered targets: {', '.join(PIPELINE_TARGETS)}."
+)
 
 
 @app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
@@ -143,12 +178,12 @@ def pipeline(
         typer.Option("--db", help="DuckDB reconstruction store."),
     ] = DEFAULT_DB_PATH,
     projected_output: Annotated[
-        Path,
+        Path | None,
         typer.Option("--projected-output", help="Projected product JSONL."),
-    ] = DEFAULT_PROJECTED_PRODUCTS_PATH,
+    ] = None,
     target: Annotated[
         str,
-        typer.Option("--target", "-t", help="Required projection target to validate/report."),
+        typer.Option("--target", "-t", help=PIPELINE_TARGET_HELP),
     ] = ...,
     schema: Annotated[
         Path | None,
@@ -156,9 +191,9 @@ def pipeline(
     ] = None,
     rules: RulesOption = None,
     validation_output: Annotated[
-        Path,
+        Path | None,
         typer.Option("--validation-output", help="Validation result JSON."),
-    ] = Path("data/results/dpp-readiness-results.json"),
+    ] = None,
     report_output_dir: Annotated[
         Path | None,
         typer.Option("--report-output-dir", help="Optional directory for report files."),
@@ -166,20 +201,23 @@ def pipeline(
 ) -> None:
     """Ingest raw files, reconstruct products, validate them, and optionally write reports."""
 
+    target_config = _pipeline_target_config(target)
+    projected_output_path = projected_output or target_config.reconstructed_output
+    validation_output_path = validation_output or target_config.validation_output
     _echo_step("Pipeline: starting ingest")
     ingest_result = _run_ingest(raw_dir=raw_dir, db=db, schema=schema)
     _echo_reconstruction_runtime(target)
     _echo_step(f"Pipeline: building {target} records from endpoint state")
-    projected_payloads = write_target_reconstruction(
-        db,
-        projected_output,
+    projected_payloads = _write_reconstruction_for_target(
+        db=db,
+        output=projected_output_path,
         target=target,
     )
-    _echo_done(f"Projected {len(projected_payloads)} products into {projected_output}")
+    _echo_done(f"Projected {len(projected_payloads)} products into {projected_output_path}")
     _echo_step(f"Pipeline: validating {len(projected_payloads)} products")
     run = _validate_records(projected_payloads, rules, target=target)
-    _echo_step(f"Pipeline: writing validation results to {validation_output}")
-    _write_validation_result(validation_output, run)
+    _echo_step(f"Pipeline: writing validation results to {validation_output_path}")
+    _write_validation_result(validation_output_path, run)
     if report_output_dir is not None:
         _echo_step(f"Pipeline: writing reports to {report_output_dir}")
         _write_report_for_target(target, run, report_output_dir)
@@ -189,7 +227,7 @@ def pipeline(
         f"Pipeline complete: {ingest_result.applied_files} raw files applied "
         f"({ingest_result.skipped_files} skipped), "
         f"{len(projected_payloads)} products reconstructed, "
-        f"{ready}/{total} ready. Results: {validation_output}"
+        f"{ready}/{total} ready. Results: {validation_output_path}"
     )
 
 
@@ -313,6 +351,18 @@ def _validate(input_path: Path, rules: Path | None, *, target: str):
     return _validate_records(records, rules, target=target)
 
 
+def _write_reconstruction_for_target(*, db: Path, output: Path, target: str):
+    if target == "check":
+        master_result = rebuild_master_reconstruction(db)
+        _echo_done(
+            f"Reconstruction stored {master_result.products_reconstructed} styles "
+            f"({master_result.source_refs} source refs, {master_result.warnings} warnings)"
+        )
+        return write_projected_products_from_master(db, output, target=target)
+
+    return write_target_reconstruction(db, output, target=target)
+
+
 def _validate_records(records, rules: Path | None, *, target: str):
     if target == "check":
         payloads = [ReconstructionCheckPayload.model_validate(record) for record in records]
@@ -338,34 +388,26 @@ def _validate_payloads(payloads: list[CentricProductPayload], rules: Path | None
 
 
 def _default_reconstruct_output(target: str) -> Path:
-    if target == "check":
-        return DEFAULT_RECONSTRUCTION_CHECK_PATH
-    if target == "dpp":
-        return DEFAULT_PROJECTED_PRODUCTS_PATH
+    if target in PIPELINE_TARGETS:
+        return PIPELINE_TARGETS[target].reconstructed_output
     return Path("data/results") / f"{_target_slug(target)}-products.jsonl"
 
 
 def _default_validate_input(target: str) -> Path:
-    if target == "check":
-        return DEFAULT_RECONSTRUCTION_CHECK_PATH
-    if target == "dpp":
-        return DEFAULT_PROJECTED_PRODUCTS_PATH
+    if target in PIPELINE_TARGETS:
+        return PIPELINE_TARGETS[target].reconstructed_output
     return Path("data/results") / f"{_target_slug(target)}-products.jsonl"
 
 
 def _default_validate_output(target: str) -> Path:
-    if target == "check":
-        return DEFAULT_RECONSTRUCTION_CHECK_RESULTS_PATH
-    if target == "dpp":
-        return DEFAULT_DPP_RESULTS_PATH
+    if target in PIPELINE_TARGETS:
+        return PIPELINE_TARGETS[target].validation_output
     return Path("data/results") / f"{_target_slug(target)}-results.json"
 
 
 def _default_report_output_dir(target: str) -> Path:
-    if target == "check":
-        return DEFAULT_RECONSTRUCTION_CHECK_REPORT_DIR
-    if target == "dpp":
-        return DEFAULT_DPP_REPORT_DIR
+    if target in PIPELINE_TARGETS:
+        return PIPELINE_TARGETS[target].report_output_dir
     return Path("reports") / _target_slug(target)
 
 
@@ -413,3 +455,15 @@ def _result_value(run, key: str, *, default):
 
 def _target_slug(target: str) -> str:
     return "".join(character if character.isalnum() else "-" for character in target).strip("-")
+
+
+def _pipeline_target_config(target: str) -> PipelineTarget:
+    return PIPELINE_TARGETS.get(
+        target,
+        PipelineTarget(
+            name=target,
+            reconstructed_output=_default_reconstruct_output(target),
+            validation_output=_default_validate_output(target),
+            report_output_dir=_default_report_output_dir(target),
+        ),
+    )

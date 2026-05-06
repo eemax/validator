@@ -163,3 +163,92 @@ def test_pipeline_requires_explicit_target(tmp_path) -> None:
     assert result.exit_code != 0
     assert "Missing option" in result.output
     assert "--target" in result.output
+
+
+def test_pipeline_supports_public_check_target(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("CENTRIC_CONFIG_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    (raw_dir / "styles.jsonl").write_text(
+        json.dumps({"id": "S1", "node_name": "Seed Jacket"}, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "pipeline",
+            "--target",
+            "check",
+            "--raw-dir",
+            str(raw_dir),
+            "--db",
+            str(tmp_path / "centric.duckdb"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Pipeline: building check records" in result.output
+    assert "Validated" not in result.output
+    assert (tmp_path / "data" / "results" / "reconstruction-check.jsonl").is_file()
+    assert (tmp_path / "data" / "results" / "reconstruction-check-results.json").is_file()
+
+
+def test_pipeline_uses_registry_defaults_for_private_targets(tmp_path, monkeypatch) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("CENTRIC_CONFIG_DIR", str(config_dir))
+    monkeypatch.chdir(tmp_path)
+    (config_dir / "reconstruction.py").write_text(
+        """
+from pathlib import Path
+
+def reconstruct_target_records(target, records_by_endpoint):
+    return [{"target": target, "style_id": style["id"]} for style in records_by_endpoint["styles"]]
+
+def validate_projected_products(target, payloads, *, rules=None):
+    payloads = list(payloads)
+    return {
+        "rule_set_version": f"{target}-rules",
+        "total_products": len(payloads),
+        "ready_products": len(payloads),
+        "readiness_percent": 100.0,
+        "results": [],
+    }
+
+def report_validation_results(target, validation_result, output_dir):
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    Path(output_dir, "summary.txt").write_text(target, encoding="utf-8")
+""",
+        encoding="utf-8",
+    )
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    (raw_dir / "styles.jsonl").write_text(
+        json.dumps({"id": "S1", "node_name": "Seed Jacket"}, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "pipeline",
+            "--target",
+            "md",
+            "--raw-dir",
+            str(raw_dir),
+            "--db",
+            str(tmp_path / "centric.duckdb"),
+            "--report-output-dir",
+            str(tmp_path / "reports" / "md-readiness"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Pipeline: building md records" in result.output
+    assert (tmp_path / "data" / "results" / "md-products.jsonl").is_file()
+    assert (tmp_path / "data" / "results" / "md-results.json").is_file()
+    assert (tmp_path / "reports" / "md-readiness" / "summary.txt").read_text(
+        encoding="utf-8"
+    ) == "md"
