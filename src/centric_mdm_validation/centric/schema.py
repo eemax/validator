@@ -31,6 +31,7 @@ DEFAULT_ENDPOINT_SCHEMAS: dict[str, EndpointSchema] = {
         "seasons",
         "materials",
         "boms",
+        "bom_section_definitions",
         "bomrows",
         "supplierquotes",
         "suppliers",
@@ -71,9 +72,7 @@ def load_endpoint_schemas(path: Path | None = None) -> dict[str, EndpointSchema]
             ),
             delete_field=_optional_string(config.get("delete_field", default.delete_field)),
             delete_when=config.get("delete_when", default.delete_when),
-            full_snapshot_mode=str(
-                config.get("full_snapshot_mode", default.full_snapshot_mode)
-            ),
+            full_snapshot_mode=str(config.get("full_snapshot_mode", default.full_snapshot_mode)),
         )
     return schemas
 

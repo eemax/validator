@@ -9,7 +9,7 @@ target-specific validation payloads, runs governed rules, and creates readiness 
 ## Current State
 
 - Python package managed by `uv`
-- CLI commands: `centric-mdm` and `centric-fetch`
+- CLI command: `centric-mdm`
 - YAML-driven DPP readiness rules
 - Pydantic models for target validation payloads
 - Product-level DPP validation with issue source fields and fix locations
@@ -35,6 +35,7 @@ status, not a product payload:
 uv run centric-mdm reconstruct
 uv run centric-mdm validate
 uv run centric-mdm report
+uv run centric-mdm examples
 ```
 
 Defaults:
@@ -97,14 +98,13 @@ and `md`; `packaging` is expected later.
 Or run ingest, reconstruct, validation, and reporting together for an explicit target:
 
 ```bash
-uv run centric-mdm pipeline \
-  --raw-dir data/raw \
-  --db data/centric.duckdb \
-  --target dpp \
-  --projected-output data/results/dpp-products.jsonl \
-  --validation-output data/results/dpp-readiness-results.json \
-  --report-output-dir reports/dpp-readiness
+uv run centric-mdm pipeline --target dpp
 ```
+
+`pipeline` writes the registered default outputs for the target. For `dpp`, that means
+`data/results/dpp-products.jsonl`, `data/results/dpp-readiness-results.json`, and
+`reports/dpp-readiness/`. Use `--reconstruction-output`, `--validation-output`, or
+`--report-output-dir` only when you want to override those defaults.
 
 Endpoint merge behavior lives in `config/endpoint-schema.yml`. Each endpoint can define its
 primary key, modified timestamp fields, inactive/tombstone handling, and full-file semantics.
@@ -230,10 +230,9 @@ export CENTRIC_PASSWORD="your-password"
 The session token is created from `CENTRIC_USERNAME` / `CENTRIC_PASSWORD`, kept in memory for
 the current process, refreshed on `401`, and never written to disk.
 
-Run the fetcher through either CLI:
+Run the fetcher through the main CLI:
 
 ```bash
-uv run centric-fetch run --config config/fetcher.yml --endpoint styles
 uv run centric-mdm fetch --config config/fetcher.yml --endpoint styles
 ```
 

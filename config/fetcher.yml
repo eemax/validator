@@ -106,6 +106,17 @@ endpoints:
       api_version: v2
       path: count/ApparelBOMRevision
       result_path: $.count
+  - name: bom_section_definitions
+    api_version: v2
+    path: bom_section_definitions
+    skip_param: skip
+    limit_param: limit
+    limit: 50
+    item_path: $
+    count_spec:
+      api_version: v2
+      path: count/BOMSectionDefinition
+      result_path: $.count
   - name: bomrows
     api_version: v3
     path: part_materials

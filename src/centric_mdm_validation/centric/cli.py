@@ -352,7 +352,7 @@ def _update_delta_state_for_endpoint(
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="centric-fetch")
+    parser = argparse.ArgumentParser(prog="centric-mdm fetch")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     run_parser = subparsers.add_parser("run", help="Run fetch jobs for one or more endpoints")

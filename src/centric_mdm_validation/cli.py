@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
+from textwrap import dedent
 from typing import Annotated
 
 import typer
@@ -30,7 +31,25 @@ from centric_mdm_validation.validation import (
     ReconstructionCheckValidator,
 )
 
-app = typer.Typer(help="Centric MDM validation tools.")
+APP_HELP = """
+Centric MDM validation tools.
+
+Workflow:
+  raw endpoint files -> DuckDB store -> check/dpp/md records -> validation -> reports
+
+Targets:
+  check  Aggregate endpoint/reference coverage.
+  dpp    DPP readiness.
+  md     Merchandise data readiness.
+
+Run `centric-mdm examples` for copy-paste workflows.
+"""
+
+app = typer.Typer(
+    help=dedent(APP_HELP).strip(),
+    no_args_is_help=True,
+    context_settings={"help_option_names": ["--help", "-h"]},
+)
 
 RulesOption = Annotated[
     Path | None,
@@ -46,7 +65,7 @@ RulesOption = Annotated[
 RULES_CONFIG_PATH = Path("rules/dpp-readiness.yml")
 DEFAULT_DB_PATH = Path("data/centric.duckdb")
 DEFAULT_RECONSTRUCTION_CHECK_RESULTS_PATH = Path("data/results/reconstruction-check-results.json")
-DEFAULT_PROJECTED_PRODUCTS_PATH = Path("data/results/projected-products.jsonl")
+DEFAULT_DPP_PRODUCTS_PATH = Path("data/results/dpp-products.jsonl")
 DEFAULT_DPP_RESULTS_PATH = Path("data/results/dpp-readiness-results.json")
 DEFAULT_RECONSTRUCTION_CHECK_REPORT_DIR = Path("reports/reconstruction-check")
 DEFAULT_DPP_REPORT_DIR = Path("reports/dpp-readiness")
@@ -69,7 +88,7 @@ PIPELINE_TARGETS = {
     ),
     "dpp": PipelineTarget(
         name="dpp",
-        reconstructed_output=DEFAULT_PROJECTED_PRODUCTS_PATH,
+        reconstructed_output=DEFAULT_DPP_PRODUCTS_PATH,
         validation_output=DEFAULT_DPP_RESULTS_PATH,
         report_output_dir=DEFAULT_DPP_REPORT_DIR,
     ),
@@ -85,15 +104,75 @@ PIPELINE_TARGET_HELP = (
     f"Registered targets: {', '.join(PIPELINE_TARGETS)}."
 )
 
+EXAMPLES_TEXT = """
+Common workflows
 
-@app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+Default aggregate check:
+  uv run centric-mdm ingest
+  uv run centric-mdm reconstruct
+  uv run centric-mdm validate
+  uv run centric-mdm report
+
+One-shot check pipeline:
+  uv run centric-mdm pipeline --target check
+
+DPP readiness:
+  uv run centric-mdm pipeline --target dpp
+
+MD readiness:
+  uv run centric-mdm pipeline --target md
+
+Run steps manually:
+  uv run centric-mdm reconstruct --target dpp --output data/results/dpp-products.jsonl
+  uv run centric-mdm validate --target dpp --input data/results/dpp-products.jsonl
+  uv run centric-mdm report --target dpp --input data/results/dpp-products.jsonl
+
+Fetch data:
+  uv run centric-mdm fetch --config config/fetcher.yml --endpoint styles
+  uv run centric-mdm fetch --config config/fetcher.yml --delta
+
+More help:
+  uv run centric-mdm --help
+  uv run centric-mdm pipeline --help
+  uv run centric-mdm fetch --help
+"""
+
+
+@app.command(
+    context_settings={
+        "allow_extra_args": True,
+        "ignore_unknown_options": True,
+        "help_option_names": [],
+    }
+)
 def fetch(ctx: typer.Context) -> None:
-    """Run Centric fetch jobs. Accepts the same arguments as `centric-fetch run`."""
+    """Run Centric fetch jobs."""
 
     args = list(ctx.args)
+    if not args:
+        _fail_with_guidance(
+            "Fetch needs a config file or help flag.",
+            [
+                "Examples:",
+                "  uv run centric-mdm fetch --config config/fetcher.yml --endpoint styles",
+                "  uv run centric-mdm fetch --config config/fetcher.yml --delta",
+                "",
+                "Show all fetch options:",
+                "  uv run centric-mdm fetch --help",
+            ],
+        )
+    if args in (["--help"], ["-h"]):
+        args = ["run", "--help"]
     if not args or args[0] != "run":
         args.insert(0, "run")
     raise typer.Exit(fetcher_main(args))
+
+
+@app.command()
+def examples() -> None:
+    """Show copy-paste examples for common workflows."""
+
+    typer.echo(dedent(EXAMPLES_TEXT).strip())
 
 
 @app.command()
@@ -133,7 +212,7 @@ def reconstruct(
     ] = None,
     target: Annotated[
         str,
-        typer.Option("--target", "-t", help="Projection target to materialize."),
+        typer.Option("--target", "-t", help="Target to reconstruct. One of: check, dpp, md."),
     ] = "check",
 ) -> None:
     """Build aggregate check state or materialize a target reconstruction."""
@@ -166,14 +245,20 @@ def pipeline(
         Path,
         typer.Option("--db", help="DuckDB reconstruction store."),
     ] = DEFAULT_DB_PATH,
-    projected_output: Annotated[
+    reconstruction_output: Annotated[
         Path | None,
-        typer.Option("--projected-output", help="Reconstructed target JSONL."),
+        typer.Option(
+            "--reconstruction-output",
+            "--projected-output",
+            help=(
+                "Reconstructed target JSONL. `--projected-output` is kept as a compatibility alias."
+            ),
+        ),
     ] = None,
     target: Annotated[
-        str,
+        str | None,
         typer.Option("--target", "-t", help=PIPELINE_TARGET_HELP),
-    ] = ...,
+    ] = None,
     schema: Annotated[
         Path | None,
         typer.Option("--schema", help="Endpoint merge schema YAML."),
@@ -185,13 +270,29 @@ def pipeline(
     ] = None,
     report_output_dir: Annotated[
         Path | None,
-        typer.Option("--report-output-dir", help="Optional directory for report files."),
+        typer.Option(
+            "--report-output-dir",
+            help="Report output directory. Defaults to the registered target report directory.",
+        ),
     ] = None,
 ) -> None:
     """Ingest raw files, reconstruct products, validate them, and optionally write reports."""
 
+    if target is None:
+        _fail_with_guidance(
+            "Pipeline needs an explicit target.",
+            [
+                "Choose one of the registered targets:",
+                "  uv run centric-mdm pipeline --target check",
+                "  uv run centric-mdm pipeline --target dpp",
+                "  uv run centric-mdm pipeline --target md",
+                "",
+                "Run `uv run centric-mdm examples` for full workflows.",
+            ],
+        )
+
     target_config = _pipeline_target_config(target)
-    projected_output_path = projected_output or target_config.reconstructed_output
+    projected_output_path = reconstruction_output or target_config.reconstructed_output
     validation_output_path = validation_output or target_config.validation_output
     _echo_step("Pipeline: starting ingest")
     ingest_result = _run_ingest(raw_dir=raw_dir, db=db, schema=schema)
@@ -225,16 +326,17 @@ def pipeline(
     run = _validate_records(projected_payloads, rules, target=target)
     _echo_step(f"Pipeline: writing validation results to {validation_output_path}")
     _write_validation_result(validation_output_path, run)
-    if report_output_dir is not None:
-        _echo_step(f"Pipeline: writing reports to {report_output_dir}")
-        _write_report_for_target(target, run, report_output_dir)
+    report_path = report_output_dir or target_config.report_output_dir
+    _echo_step(f"Pipeline: writing reports to {report_path}")
+    _write_report_for_target(target, run, report_path)
 
     total, ready = _validation_counts(run)
     _echo_done(
         f"Pipeline complete: {ingest_result.applied_files} raw files applied "
         f"({ingest_result.skipped_files} skipped), "
         f"{len(projected_payloads)} products reconstructed, "
-        f"{ready}/{total} ready. Results: {validation_output_path}"
+        f"{ready}/{total} ready. Results: {validation_output_path}. "
+        f"Reports: {report_path}"
     )
 
 
@@ -254,7 +356,7 @@ def validate(
         typer.Option("--output", "-o", help="Validation result JSON."),
     ] = None,
 ) -> None:
-    """Validate reconstruction check or projected target payloads."""
+    """Validate aggregate check results or target reconstruction payloads."""
 
     input_file = input_path or _default_validate_input(target)
     output_file = output or _default_validate_output(target)
@@ -365,7 +467,39 @@ def _echo_done(message: str) -> None:
     typer.echo(f"OK {message}")
 
 
+def _fail_with_guidance(message: str, guidance: list[str]) -> None:
+    typer.secho(f"Error: {message}", fg=typer.colors.RED, err=True)
+    if guidance:
+        typer.echo("", err=True)
+        for line in guidance:
+            typer.echo(line, err=True)
+    raise typer.Exit(2)
+
+
+def _missing_input_guidance(*, input_path: Path, target: str) -> list[str]:
+    if target == "check":
+        return [
+            "Build the aggregate check result first:",
+            "  uv run centric-mdm reconstruct",
+            "",
+            "Or run the whole check workflow:",
+            "  uv run centric-mdm pipeline --target check",
+        ]
+    return [
+        f"Build {target!r} records first:",
+        f"  uv run centric-mdm reconstruct --target {target} --output {input_path}",
+        "",
+        "Or run the whole target workflow:",
+        f"  uv run centric-mdm pipeline --target {target}",
+    ]
+
+
 def _validate(input_path: Path, rules: Path | None, *, target: str):
+    if not input_path.is_file():
+        _fail_with_guidance(
+            f"Input file not found: {input_path}",
+            _missing_input_guidance(input_path=input_path, target=target),
+        )
     records = read_json_records(input_path)
     return _validate_records(records, rules, target=target)
 
