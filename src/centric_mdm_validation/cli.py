@@ -28,6 +28,12 @@ from centric_mdm_validation.models import (
     ReconstructionCheckPayload,
     ValidationRunResult,
 )
+from centric_mdm_validation.progress import (
+    ProgressReporter,
+    progress_enabled,
+    progress_message,
+    progress_section,
+)
 from centric_mdm_validation.reporting import DppReadinessReporter, ReconstructionCheckReporter
 from centric_mdm_validation.validation import (
     DppReadinessValidator,
@@ -63,6 +69,15 @@ RulesOption = Annotated[
         help=(
             "DPP readiness rule YAML. Defaults to CENTRIC_CONFIG_DIR/rules/dpp-readiness.yml "
             "or .local/rules/dpp-readiness.yml."
+        ),
+    ),
+]
+ProgressOption = Annotated[
+    bool | None,
+    typer.Option(
+        "--progress/--no-progress",
+        help=(
+            "Show live progress and detailed stage output. Defaults to on in interactive terminals."
         ),
     ),
 ]
@@ -107,6 +122,44 @@ PIPELINE_TARGET_HELP = (
     "Required target to reconstruct, validate, and report. "
     f"Registered targets: {', '.join(PIPELINE_TARGETS)}."
 )
+DEFAULT_PIPELINE_WEIGHTS = {
+    "ingest": 0.10,
+    "reconstruct": 0.25,
+    "validate": 0.15,
+    "report": 0.50,
+}
+DPP_PIPELINE_WEIGHTS = {
+    # Based on a local DPP benchmark where report generation dominated runtime.
+    "ingest": 0.01,
+    "reconstruct": 0.14,
+    "validate": 0.04,
+    "report": 0.81,
+}
+DPP_PIPELINE_ESTIMATES = {
+    # Seconds from the same DPP benchmark used for the initial weights.
+    "ingest": 0.1,
+    "reconstruct": 8.4,
+    "validate": 2.2,
+    "report": 47.9,
+}
+CHECK_PIPELINE_WEIGHTS = {
+    "ingest": 0.20,
+    "reconstruct": 0.35,
+    "validate": 0.05,
+    "report": 0.40,
+}
+CHECK_PIPELINE_ESTIMATES = {
+    "ingest": 0.2,
+    "reconstruct": 0.2,
+    "validate": 0.1,
+    "report": 0.2,
+}
+DEFAULT_PIPELINE_ESTIMATES = {
+    "ingest": 1.0,
+    "reconstruct": 10.0,
+    "validate": 5.0,
+    "report": 20.0,
+}
 
 EXAMPLES_TEXT = """
 Common workflows
@@ -125,6 +178,9 @@ DPP readiness:
 
 MD readiness:
   uv run centric-mdm pipeline --target md
+
+Force live progress output:
+  uv run centric-mdm pipeline --target dpp --progress
 
 Run steps manually:
   uv run centric-mdm reconstruct --target dpp --output data/results/dpp-products.jsonl
@@ -193,10 +249,18 @@ def ingest(
         Path | None,
         typer.Option("--schema", help="Endpoint merge schema YAML."),
     ] = None,
+    progress: ProgressOption = None,
 ) -> None:
     """Catch up the DuckDB reconstruction store from immutable raw endpoint files."""
 
-    result = _run_ingest(raw_dir=raw_dir, db=db, schema=schema)
+    with ProgressReporter(enabled=progress) as progress_reporter:
+        progress_section("Ingest raw files")
+        result = _run_ingest(
+            raw_dir=raw_dir,
+            db=db,
+            schema=schema,
+            progress=progress_reporter,
+        )
     _echo_done(
         f"Ingested {result.applied_files} raw files into {db} "
         f"({result.skipped_files} already applied, {result.records_upserted} upserts, "
@@ -218,25 +282,30 @@ def reconstruct(
         str,
         typer.Option("--target", "-t", help="Target to reconstruct. One of: check, dpp, md."),
     ] = "check",
+    progress: ProgressOption = None,
 ) -> None:
     """Build aggregate check state or materialize a target reconstruction."""
 
     output_path = output or _default_reconstruct_output(target)
-    if target != "check":
-        _echo_reconstruction_runtime(target)
-        _echo_step(f"Reconstruct: building {target} records from endpoint state in {db}")
-        payloads = write_target_reconstruction(
-            db,
-            output_path,
-            target=target,
-        )
-        _echo_done(f"Wrote {len(payloads)} {target} records to {output_path}")
-        return
+    with ProgressReporter(enabled=progress) as progress_reporter:
+        if target != "check":
+            progress_section(f"Reconstruct {target}")
+            _echo_reconstruction_runtime(target)
+            _echo_step(f"Reconstruct: building {target} records from endpoint state in {db}")
+            payloads = write_target_reconstruction(
+                db,
+                output_path,
+                target=target,
+                progress=progress_reporter,
+            )
+            _echo_done(f"Wrote {len(payloads)} {target} records to {output_path}")
+            return
 
-    _echo_step(f"Check: measuring aggregate endpoint coverage from {db}")
-    run = run_reconstruction_coverage_check(db)
-    _write_validation_result(output_path, run)
-    _echo_done(f"Wrote aggregate check results to {output_path}")
+        progress_section("Reconstruction check")
+        _echo_step(f"Check: measuring aggregate endpoint coverage from {db}")
+        run = run_reconstruction_coverage_check(db, progress=progress_reporter)
+        _write_validation_result(output_path, run)
+        _echo_done(f"Wrote aggregate check results to {output_path}")
 
 
 @app.command()
@@ -279,6 +348,7 @@ def pipeline(
             help="Report output directory. Defaults to the registered target report directory.",
         ),
     ] = None,
+    progress: ProgressOption = None,
 ) -> None:
     """Ingest raw files, reconstruct products, validate them, and optionally write reports."""
 
@@ -298,50 +368,113 @@ def pipeline(
     target_config = _pipeline_target_config(target)
     projected_output_path = reconstruction_output or target_config.reconstructed_output
     validation_output_path = validation_output or target_config.validation_output
-    _echo_step("Pipeline: starting ingest")
-    ingest_result = _run_ingest(raw_dir=raw_dir, db=db, schema=schema)
-    if target == "check":
-        _echo_step("Pipeline: checking aggregate endpoint coverage")
-        run = run_reconstruction_coverage_check(db)
-        _echo_step(f"Pipeline: writing check results to {validation_output_path}")
+    with ProgressReporter(enabled=progress) as progress_reporter:
+        progress_message(f"Pipeline: {target}")
+        weights = _pipeline_weights(target)
+        estimates = _pipeline_estimates(target)
+        progress_reporter.start_overall("Overall")
+        progress_reporter.begin_overall_stage(
+            weights["ingest"],
+            estimated_seconds=estimates["ingest"],
+        )
+        progress_section("[1/4] Ingest raw files")
+        _echo_step("Pipeline: starting ingest")
+        ingest_result = _run_ingest(
+            raw_dir=raw_dir,
+            db=db,
+            schema=schema,
+            progress=progress_reporter,
+        )
+        progress_reporter.finish_overall_stage()
+        if target == "check":
+            progress_reporter.begin_overall_stage(
+                weights["reconstruct"],
+                estimated_seconds=estimates["reconstruct"],
+            )
+            progress_section("[2/4] Check endpoint coverage")
+            _echo_step("Pipeline: checking aggregate endpoint coverage")
+            run = run_reconstruction_coverage_check(db, progress=progress_reporter)
+            progress_reporter.finish_overall_stage()
+            progress_reporter.begin_overall_stage(
+                weights["validate"],
+                estimated_seconds=estimates["validate"],
+            )
+            progress_section("[3/4] Write validation results")
+            _echo_step(f"Pipeline: writing check results to {validation_output_path}")
+            _write_validation_result(validation_output_path, run)
+            progress_reporter.finish_overall_stage()
+            report_path = report_output_dir or target_config.report_output_dir
+            progress_reporter.begin_overall_stage(
+                weights["report"],
+                estimated_seconds=estimates["report"],
+            )
+            progress_section("[4/4] Write reports")
+            _echo_step(f"Pipeline: writing aggregate check report to {report_path}")
+            _write_report_for_target(target, run, report_path, progress=progress_reporter)
+            progress_reporter.finish_overall_stage()
+            progress_reporter.finish_overall()
+            summary = run.get("summary", {})
+            _echo_done(
+                f"Check complete: {ingest_result.applied_files} raw files applied "
+                f"({ingest_result.skipped_files} skipped), "
+                f"{summary.get('declared_refs', 0)} refs checked, "
+                f"{summary.get('coverage_percent', 0.0)}% coverage. "
+                f"Results: {validation_output_path}"
+            )
+            return
+
+        progress_reporter.begin_overall_stage(
+            weights["reconstruct"],
+            estimated_seconds=estimates["reconstruct"],
+        )
+        progress_section(f"[2/4] Reconstruct {target.upper()}")
+        _echo_reconstruction_runtime(target)
+        _echo_step(f"Pipeline: building {target} records from endpoint state")
+        projected_payloads = _write_reconstruction_for_target(
+            db=db,
+            output=projected_output_path,
+            target=target,
+            progress=progress_reporter,
+        )
+        if not progress_enabled():
+            _echo_done(
+                f"Reconstructed {len(projected_payloads)} products into {projected_output_path}"
+            )
+        progress_reporter.finish_overall_stage()
+        progress_reporter.begin_overall_stage(
+            weights["validate"],
+            estimated_seconds=estimates["validate"],
+        )
+        progress_section(f"[3/4] Validate {target.upper()}")
+        _echo_step(f"Pipeline: validating {len(projected_payloads)} products")
+        run = _validate_records(
+            projected_payloads,
+            rules,
+            target=target,
+            progress=progress_reporter,
+        )
+        progress_reporter.finish_overall_stage()
+        progress_reporter.begin_overall_stage(
+            weights["report"],
+            estimated_seconds=estimates["report"],
+        )
+        progress_section("[4/4] Write reports")
+        _echo_step(f"Pipeline: writing validation results to {validation_output_path}")
         _write_validation_result(validation_output_path, run)
         report_path = report_output_dir or target_config.report_output_dir
-        _echo_step(f"Pipeline: writing aggregate check report to {report_path}")
-        _write_report_for_target(target, run, report_path)
-        summary = run.get("summary", {})
+        _echo_step(f"Pipeline: writing reports to {report_path}")
+        _write_report_for_target(target, run, report_path, progress=progress_reporter)
+        progress_reporter.finish_overall_stage()
+        progress_reporter.finish_overall()
+
+        total, ready = _validation_counts(run)
         _echo_done(
-            f"Check complete: {ingest_result.applied_files} raw files applied "
+            f"Pipeline complete: {ingest_result.applied_files} raw files applied "
             f"({ingest_result.skipped_files} skipped), "
-            f"{summary.get('declared_refs', 0)} refs checked, "
-            f"{summary.get('coverage_percent', 0.0)}% coverage. "
-            f"Results: {validation_output_path}"
+            f"{len(projected_payloads)} products reconstructed, "
+            f"{ready}/{total} ready. Results: {validation_output_path}. "
+            f"Reports: {report_path}"
         )
-        return
-
-    _echo_reconstruction_runtime(target)
-    _echo_step(f"Pipeline: building {target} records from endpoint state")
-    projected_payloads = _write_reconstruction_for_target(
-        db=db,
-        output=projected_output_path,
-        target=target,
-    )
-    _echo_done(f"Reconstructed {len(projected_payloads)} products into {projected_output_path}")
-    _echo_step(f"Pipeline: validating {len(projected_payloads)} products")
-    run = _validate_records(projected_payloads, rules, target=target)
-    _echo_step(f"Pipeline: writing validation results to {validation_output_path}")
-    _write_validation_result(validation_output_path, run)
-    report_path = report_output_dir or target_config.report_output_dir
-    _echo_step(f"Pipeline: writing reports to {report_path}")
-    _write_report_for_target(target, run, report_path)
-
-    total, ready = _validation_counts(run)
-    _echo_done(
-        f"Pipeline complete: {ingest_result.applied_files} raw files applied "
-        f"({ingest_result.skipped_files} skipped), "
-        f"{len(projected_payloads)} products reconstructed, "
-        f"{ready}/{total} ready. Results: {validation_output_path}. "
-        f"Reports: {report_path}"
-    )
 
 
 @app.command()
@@ -359,15 +492,18 @@ def validate(
         Path | None,
         typer.Option("--output", "-o", help="Validation result JSON."),
     ] = None,
+    progress: ProgressOption = None,
 ) -> None:
     """Validate aggregate check results or target reconstruction payloads."""
 
     input_file = input_path or _default_validate_input(target)
     output_file = output or _default_validate_output(target)
-    _echo_step(f"Validate: reading {target} records from {input_file}")
-    run = _validate(input_file, rules, target=target)
-    _echo_step(f"Validate: writing results to {output_file}")
-    _write_validation_result(output_file, run)
+    with ProgressReporter(enabled=progress) as progress_reporter:
+        progress_section(f"Validate {target}")
+        _echo_step(f"Validate: reading {target} records from {input_file}")
+        run = _validate(input_file, rules, target=target, progress=progress_reporter)
+        _echo_step(f"Validate: writing results to {output_file}")
+        _write_validation_result(output_file, run)
     if target == "check" and isinstance(run, dict):
         summary = run.get("summary", {})
         _echo_done(
@@ -396,15 +532,18 @@ def report(
         Path | None,
         typer.Option("--output-dir", "-o", help="Directory for report files."),
     ] = None,
+    progress: ProgressOption = None,
 ) -> None:
     """Create reconstruction check or target readiness reports."""
 
     input_file = input_path or _default_validate_output(target)
     output_path = output_dir or _default_report_output_dir(target)
-    _echo_step(f"Report: reading {target} records from {input_file}")
-    run = _read_report_input(input_file, rules, target=target)
-    _echo_step(f"Report: writing report files to {output_path}")
-    _write_report_for_target(target, run, output_path)
+    with ProgressReporter(enabled=progress) as progress_reporter:
+        progress_section(f"Report {target}")
+        _echo_step(f"Report: reading {target} records from {input_file}")
+        run = _read_report_input(input_file, rules, target=target, progress=progress_reporter)
+        _echo_step(f"Report: writing report files to {output_path}")
+        _write_report_for_target(target, run, output_path, progress=progress_reporter)
     if target == "check" and isinstance(run, dict):
         summary = run.get("summary", {})
         _echo_done(
@@ -416,22 +555,61 @@ def report(
     _echo_done(f"Wrote {target} reports for {total} records into {output_path}")
 
 
-def _run_ingest(raw_dir: Path, db: Path, schema: Path | None):
+def _run_ingest(
+    raw_dir: Path,
+    db: Path,
+    schema: Path | None,
+    *,
+    progress: ProgressReporter | None = None,
+):
     raw_files = discover_raw_files(raw_dir)
     _echo_step(f"Ingest: discovered {len(raw_files)} raw JSONL files under {raw_dir}")
     _echo_step(f"Ingest: updating DuckDB store at {db}")
+    progress_callback = (
+        _rich_ingest_progress(progress) if progress and progress.enabled else _echo_ingest_progress
+    )
     result = ingest_raw_dir(
         raw_dir,
         db,
         schemas=load_endpoint_schemas(schema),
-        progress=_echo_ingest_progress,
+        progress=progress_callback,
     )
+    if progress and progress.enabled:
+        progress.emit(
+            "Ingesting raw files",
+            "finish",
+            total=len(raw_files) or None,
+            message=(f"{result.applied_files} applied, {result.skipped_files} skipped"),
+        )
     if result.endpoints:
         endpoint_counts = ", ".join(
             f"{endpoint}={count}" for endpoint, count in result.endpoints.items()
         )
         _echo_step(f"Ingest: records read by endpoint: {endpoint_counts}")
     return result
+
+
+def _rich_ingest_progress(progress: ProgressReporter):
+    def _callback(event: IngestFileProgress) -> None:
+        if event.action == "start" and event.file_index == 1:
+            progress.emit(
+                "Ingesting raw files",
+                "start",
+                current=0,
+                total=event.total_files,
+                unit="files",
+            )
+            return
+        if event.action in {"skipped", "applied"}:
+            progress.emit(
+                "Ingesting raw files",
+                "update",
+                current=event.file_index,
+                total=event.total_files,
+                message=event.raw_file.endpoint,
+            )
+
+    return _callback
 
 
 def _echo_ingest_progress(event: IngestFileProgress) -> None:
@@ -464,10 +642,15 @@ def _echo_reconstruction_runtime(target: str) -> None:
 
 
 def _echo_step(message: str) -> None:
+    if progress_enabled():
+        return
     typer.echo(f"-> {message}")
 
 
 def _echo_done(message: str) -> None:
+    if progress_enabled():
+        progress_message(f"OK {message}")
+        return
     typer.echo(f"OK {message}")
 
 
@@ -498,17 +681,29 @@ def _missing_input_guidance(*, input_path: Path, target: str) -> list[str]:
     ]
 
 
-def _validate(input_path: Path, rules: Path | None, *, target: str):
+def _validate(
+    input_path: Path,
+    rules: Path | None,
+    *,
+    target: str,
+    progress: ProgressReporter | None = None,
+):
     if not input_path.is_file():
         _fail_with_guidance(
             f"Input file not found: {input_path}",
             _missing_input_guidance(input_path=input_path, target=target),
         )
     records = read_json_records(input_path)
-    return _validate_records(records, rules, target=target)
+    return _validate_records(records, rules, target=target, progress=progress)
 
 
-def _read_report_input(input_path: Path, rules: Path | None, *, target: str):
+def _read_report_input(
+    input_path: Path,
+    rules: Path | None,
+    *,
+    target: str,
+    progress: ProgressReporter | None = None,
+):
     if not input_path.is_file():
         _fail_with_guidance(
             f"Input file not found: {input_path}",
@@ -520,7 +715,7 @@ def _read_report_input(input_path: Path, rules: Path | None, *, target: str):
         if target == "dpp" and not has_private_report_hook():
             return ValidationRunResult.model_validate(run)
         return run
-    return _validate_records(records, rules, target=target)
+    return _validate_records(records, rules, target=target, progress=progress)
 
 
 def _is_validation_result(record: dict) -> bool:
@@ -532,23 +727,51 @@ def _is_validation_result(record: dict) -> bool:
     }.issubset(record)
 
 
-def _write_reconstruction_for_target(*, db: Path, output: Path, target: str):
+def _write_reconstruction_for_target(
+    *,
+    db: Path,
+    output: Path,
+    target: str,
+    progress: ProgressReporter | None = None,
+):
     if target == "check":
-        run = run_reconstruction_coverage_check(db)
+        run = run_reconstruction_coverage_check(db, progress=progress)
         _write_validation_result(output, run)
         return [run]
 
-    return write_target_reconstruction(db, output, target=target)
+    return write_target_reconstruction(db, output, target=target, progress=progress)
 
 
-def _validate_records(records, rules: Path | None, *, target: str):
+def _validate_records(
+    records,
+    rules: Path | None,
+    *,
+    target: str,
+    progress: ProgressReporter | None = None,
+):
     if target == "check":
         if len(records) == 1 and "relationship_coverage" in records[0]:
             return records[0]
+        if progress is not None:
+            progress.emit(
+                "Validating check records",
+                "start",
+                current=0,
+                total=len(records),
+                unit="records",
+            )
         payloads = [ReconstructionCheckPayload.model_validate(record) for record in records]
-        return ReconstructionCheckValidator().validate_many(payloads)
+        run = ReconstructionCheckValidator().validate_many(payloads)
+        if progress is not None:
+            progress.emit(
+                "Validating check records",
+                "finish",
+                total=len(records),
+                message="done",
+            )
+        return run
     if has_private_validation_hook():
-        return validate_projected_products(target, records, rules=rules)
+        return validate_projected_products(target, records, rules=rules, progress=progress)
     if target != "dpp":
         raise typer.BadParameter(f"Private validation required for target {target!r}.")
     payloads = [CentricProductPayload.model_validate(record) for record in records]
@@ -585,21 +808,35 @@ def _default_report_output_dir(target: str) -> Path:
     return Path("reports") / _target_slug(target)
 
 
-def _write_report_for_target(target: str, run, output_dir: Path) -> None:
+def _write_report_for_target(
+    target: str,
+    run,
+    output_dir: Path,
+    *,
+    progress: ProgressReporter | None = None,
+) -> None:
     if target not in {"check", "dpp"} and has_private_report_hook():
-        report_validation_results(target, run, output_dir)
+        report_validation_results(target, run, output_dir, progress=progress)
         return
     if target == "check":
+        if progress is not None:
+            progress.emit("Writing check report", "start", message=str(output_dir))
         ReconstructionCheckReporter().write_all(run, output_dir)
+        if progress is not None:
+            progress.emit("Writing check report", "finish", message=str(output_dir))
         return
     if target == "dpp":
         if has_private_report_hook():
-            report_validation_results(target, run, output_dir)
+            report_validation_results(target, run, output_dir, progress=progress)
             return
+        if progress is not None:
+            progress.emit("Writing dpp report", "start", message=str(output_dir))
         DppReadinessReporter().write_all(run, output_dir)
+        if progress is not None:
+            progress.emit("Writing dpp report", "finish", message=str(output_dir))
         return
     if has_private_report_hook():
-        report_validation_results(target, run, output_dir)
+        report_validation_results(target, run, output_dir, progress=progress)
         return
     raise typer.BadParameter(f"Private reporting required for target {target!r}.")
 
@@ -641,3 +878,19 @@ def _pipeline_target_config(target: str) -> PipelineTarget:
             report_output_dir=_default_report_output_dir(target),
         ),
     )
+
+
+def _pipeline_weights(target: str) -> dict[str, float]:
+    if target == "dpp":
+        return DPP_PIPELINE_WEIGHTS
+    if target == "check":
+        return CHECK_PIPELINE_WEIGHTS
+    return DEFAULT_PIPELINE_WEIGHTS
+
+
+def _pipeline_estimates(target: str) -> dict[str, float]:
+    if target == "dpp":
+        return DPP_PIPELINE_ESTIMATES
+    if target == "check":
+        return CHECK_PIPELINE_ESTIMATES
+    return DEFAULT_PIPELINE_ESTIMATES

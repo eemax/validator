@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
-from openpyxl.worksheet.table import Table, TableStyleInfo
 
 HEADER_FILL = "1F4E78"
 HEADER_FONT = "FFFFFF"
@@ -151,11 +149,11 @@ def append_rows(sheet, headers: Iterable[str], rows: Iterable[Any], *, config=No
 
 def format_workbook(workbook, *, config=None) -> None:
     config = config or DEFAULT_FORMAT_CONFIG
-    for index, sheet in enumerate(workbook.worksheets, start=1):
-        format_sheet(sheet, table_index=index, config=config)
+    for sheet in workbook.worksheets:
+        format_sheet(sheet, config=config)
 
 
-def format_sheet(sheet, *, table_index=1, config=None) -> None:
+def format_sheet(sheet, *, config=None) -> None:
     config = config or DEFAULT_FORMAT_CONFIG
     if sheet.max_row < 1:
         return
@@ -163,7 +161,6 @@ def format_sheet(sheet, *, table_index=1, config=None) -> None:
     _style_body(sheet, config)
     _set_dimensions(sheet, config)
     _set_filters_and_freeze(sheet)
-    _add_table(sheet, table_index=table_index)
 
 
 def _style_header(sheet) -> None:
@@ -305,19 +302,3 @@ def _header_key(header, config: ExcelFormatConfig) -> str:
         return display_header_keys[header]
     return str(header).strip().lower().replace("%", "percent").replace(" ", "_")
 
-
-def _add_table(sheet, *, table_index) -> None:
-    if sheet.max_row < 2 or sheet.max_column < 1:
-        return
-    ref = f"A1:{get_column_letter(sheet.max_column)}{sheet.max_row}"
-    name_base = re.sub(r"[^A-Za-z0-9_]", "_", sheet.title)
-    name = f"Table_{table_index}_{name_base}"[:255]
-    table = Table(displayName=name, ref=ref)
-    table.tableStyleInfo = TableStyleInfo(
-        name="TableStyleMedium2",
-        showFirstColumn=False,
-        showLastColumn=False,
-        showRowStripes=True,
-        showColumnStripes=False,
-    )
-    sheet.add_table(table)

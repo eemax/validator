@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import sys
 from collections.abc import Iterable, Mapping
 from contextlib import suppress
@@ -203,16 +204,20 @@ def reconstruct_target_records(
     records_by_endpoint: Mapping[str, Iterable[dict[str, Any]]],
     *,
     reconstruction_path: Path | None = None,
+    progress: Any | None = None,
 ) -> list[BaseModel | dict[str, Any]]:
     """Build target-specific reconstruction records directly from endpoint state."""
 
     module = load_private_reconstruction_module(reconstruction_path)
     reconstruction = getattr(module, "reconstruct_target_records", None) if module else None
     if callable(reconstruction):
-        return [
-            _coerce_projected_payload(payload)
-            for payload in reconstruction(target, records_by_endpoint)
-        ]
+        payloads = _call_with_optional_progress(
+            reconstruction,
+            target,
+            records_by_endpoint,
+            progress=progress,
+        )
+        return [_coerce_projected_payload(payload) for payload in payloads]
 
     raise ValueError(
         f"Private reconstruction required for target {target!r}. Define "
@@ -227,13 +232,20 @@ def validate_projected_products(
     *,
     rules: Path | None = None,
     reconstruction_path: Path | None = None,
+    progress: Any | None = None,
 ) -> BaseModel | Mapping[str, Any]:
     """Validate target payloads with a private validation hook."""
 
     module = load_private_reconstruction_module(reconstruction_path)
     validation = getattr(module, "validate_projected_products", None) if module else None
     if callable(validation):
-        return validation(target, payloads, rules=rules)
+        return _call_with_optional_progress(
+            validation,
+            target,
+            payloads,
+            rules=rules,
+            progress=progress,
+        )
 
     raise ValueError(
         f"Private validation required for target {target!r}. Define "
@@ -248,13 +260,20 @@ def report_validation_results(
     output_dir: Path,
     *,
     reconstruction_path: Path | None = None,
+    progress: Any | None = None,
 ) -> None:
     """Write target reports with a private report hook."""
 
     module = load_private_reconstruction_module(reconstruction_path)
     report = getattr(module, "report_validation_results", None) if module else None
     if callable(report):
-        report(target, validation_result, output_dir)
+        _call_with_optional_progress(
+            report,
+            target,
+            validation_result,
+            output_dir,
+            progress=progress,
+        )
         return
 
     raise ValueError(
@@ -299,6 +318,20 @@ def resolve_reconstruction_path(path: Path | None = None) -> Path | None:
         return path
 
     return resolve_optional_private_config_path(RECONSTRUCTION_CONFIG_PATH)
+
+
+def _call_with_optional_progress(function, *args, progress: Any | None = None, **kwargs):
+    if progress is not None and _supports_keyword(function, "progress"):
+        kwargs["progress"] = progress
+    return function(*args, **kwargs)
+
+
+def _supports_keyword(function, name: str) -> bool:
+    signature = inspect.signature(function)
+    return name in signature.parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
 
 
 def _placeholder_master_products(

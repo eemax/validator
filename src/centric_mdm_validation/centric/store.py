@@ -21,6 +21,7 @@ from centric_mdm_validation.centric.reconstruction import (
 )
 from centric_mdm_validation.centric.schema import EndpointSchema
 from centric_mdm_validation.io import write_jsonl
+from centric_mdm_validation.progress import ProgressEvent
 
 
 @dataclass(frozen=True)
@@ -223,16 +224,55 @@ def _emit_ingest_progress(
     )
 
 
+def _emit_progress(
+    progress: Callable[[ProgressEvent], None] | None,
+    *,
+    stage: str,
+    action: str,
+    message: str = "",
+    current: int | None = None,
+    total: int | None = None,
+    unit: str = "",
+) -> None:
+    if progress is None:
+        return
+    progress(
+        ProgressEvent(
+            stage=stage,
+            action=action,
+            message=message,
+            current=current,
+            total=total,
+            unit=unit,
+        )
+    )
+
+
 def write_target_reconstruction(
     db_path: Path,
     output_path: Path,
     *,
     target: str,
+    progress: Callable[[ProgressEvent], None] | None = None,
 ) -> list[Any]:
-    payloads = reconstruct_products_for_target(db_path, target=target)
+    payloads = reconstruct_products_for_target(db_path, target=target, progress=progress)
+    _emit_progress(
+        progress,
+        stage=f"Writing {target} records",
+        action="start",
+        message=str(output_path),
+        total=len(payloads),
+    )
     write_jsonl(
         output_path,
         (_payload_to_json_record(payload) for payload in payloads),
+    )
+    _emit_progress(
+        progress,
+        stage=f"Writing {target} records",
+        action="finish",
+        message=str(output_path),
+        total=len(payloads),
     )
     return payloads
 
@@ -255,18 +295,64 @@ def reconstruct_products_for_target(
     db_path: Path,
     *,
     target: str,
+    progress: Callable[[ProgressEvent], None] | None = None,
 ) -> list[Any]:
+    _emit_progress(
+        progress,
+        stage="Loading endpoint records",
+        action="start",
+        message=str(db_path),
+    )
     with duckdb.connect(str(db_path)) as conn:
         initialize_store(conn)
         records_by_endpoint = load_current_endpoint_records(conn)
-    return reconstruct_target_records(target, records_by_endpoint)
+    record_count = sum(len(records) for records in records_by_endpoint.values())
+    _emit_progress(
+        progress,
+        stage="Loading endpoint records",
+        action="finish",
+        message=f"{record_count} records",
+    )
+    return reconstruct_target_records(target, records_by_endpoint, progress=progress)
 
 
-def run_reconstruction_coverage_check(db_path: Path) -> dict[str, Any]:
+def run_reconstruction_coverage_check(
+    db_path: Path,
+    *,
+    progress: Callable[[ProgressEvent], None] | None = None,
+) -> dict[str, Any]:
+    _emit_progress(
+        progress,
+        stage="Loading endpoint records",
+        action="start",
+        message=str(db_path),
+    )
     with duckdb.connect(str(db_path)) as conn:
         initialize_store(conn)
         records_by_endpoint = load_current_endpoint_records(conn)
-    return build_reconstruction_coverage_check(records_by_endpoint)
+    record_count = sum(len(records) for records in records_by_endpoint.values())
+    _emit_progress(
+        progress,
+        stage="Loading endpoint records",
+        action="finish",
+        message=f"{record_count} records",
+    )
+    _emit_progress(
+        progress,
+        stage="Checking endpoint coverage",
+        action="start",
+        total=len(_COVERAGE_RULES),
+        unit="relationships",
+    )
+    run = build_reconstruction_coverage_check(records_by_endpoint)
+    _emit_progress(
+        progress,
+        stage="Checking endpoint coverage",
+        action="finish",
+        total=len(_COVERAGE_RULES),
+        message="done",
+    )
+    return run
 
 
 def build_reconstruction_coverage_check(

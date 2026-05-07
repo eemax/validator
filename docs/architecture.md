@@ -89,15 +89,19 @@ CENTRIC_CONFIG_DIR/
 The public loader only imports `reconstruction.py`. That module can define:
 
 ```python
-def reconstruct_target_records(target, records_by_endpoint):
+def reconstruct_target_records(target, records_by_endpoint, *, progress=None):
     ...
 
-def validate_projected_products(target, payloads, *, rules=None):
+def validate_projected_products(target, payloads, *, rules=None, progress=None):
     ...
 
-def report_validation_results(target, validation_result, output_dir):
+def report_validation_results(target, validation_result, output_dir, *, progress=None):
     ...
 ```
+
+The optional `progress` callback receives generic progress events from long-running private
+reconstruction, validation, and reporting work. The public CLI renders those events with live
+progress bars in interactive terminals and falls back to plain milestone output otherwise.
 
 Private target reconstructors own endpoint relationships and target assembly rules, such as how
 BOM rows attach to styles, how current BOM revisions are selected, which material/supplier/factory

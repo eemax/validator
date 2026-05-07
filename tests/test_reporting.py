@@ -1,4 +1,5 @@
 from pathlib import Path
+from zipfile import ZipFile
 
 from openpyxl import load_workbook
 
@@ -65,3 +66,6 @@ def test_reconstruction_check_reporter_writes_single_summary_and_workbook(
     unresolved_rows = list(workbook["Unresolved Refs"].iter_rows(values_only=True))
     assert unresolved_rows[0] == ("Relationship", "Target Endpoint", "Status", "Count")
     assert any(row[2] == "not_seen" for row in unresolved_rows[1:])
+
+    with ZipFile(tmp_path / "reconstruction-check.xlsx") as archive:
+        assert not any(name.startswith("xl/tables/") for name in archive.namelist())

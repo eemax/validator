@@ -101,6 +101,14 @@ Or run ingest, reconstruct, validation, and reporting together for an explicit t
 uv run centric-mdm pipeline --target dpp
 ```
 
+Long-running commands show live progress by default in interactive terminals. Use
+`--no-progress` for plain milestone output, or `--progress` to force progress output where the
+terminal is not detected as interactive:
+
+```bash
+uv run centric-mdm pipeline --target dpp --progress
+```
+
 `pipeline` writes the registered default outputs for the target. For `dpp`, that means
 `data/results/dpp-products.jsonl`, `data/results/dpp-readiness-results.json`, and
 `reports/dpp-readiness/`. Use `--reconstruction-output`, `--validation-output`, or
@@ -150,15 +158,15 @@ The public loader only imports the private `reconstruction.py` entrypoint. That 
 route to private modules using these hooks:
 
 ```python
-def reconstruct_target_records(target, records_by_endpoint):
+def reconstruct_target_records(target, records_by_endpoint, *, progress=None):
     ...
 
 
-def validate_projected_products(target, payloads, *, rules=None):
+def validate_projected_products(target, payloads, *, rules=None, progress=None):
     ...
 
 
-def report_validation_results(target, validation_result, output_dir):
+def report_validation_results(target, validation_result, output_dir, *, progress=None):
     ...
 ```
 
