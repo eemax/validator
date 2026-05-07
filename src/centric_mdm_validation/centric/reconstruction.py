@@ -260,6 +260,7 @@ def report_validation_results(
     output_dir: Path,
     *,
     reconstruction_path: Path | None = None,
+    template: str = "default",
     progress: Any | None = None,
 ) -> None:
     """Write target reports with a private report hook."""
@@ -267,12 +268,21 @@ def report_validation_results(
     module = load_private_reconstruction_module(reconstruction_path)
     report = getattr(module, "report_validation_results", None) if module else None
     if callable(report):
+        kwargs: dict[str, Any] = {}
+        if _supports_keyword(report, "template"):
+            kwargs["template"] = template
+        elif template != "default":
+            raise ValueError(
+                f"Private reporting template {template!r} requires "
+                "report_validation_results(..., template=...) support."
+            )
         _call_with_optional_progress(
             report,
             target,
             validation_result,
             output_dir,
             progress=progress,
+            **kwargs,
         )
         return
 

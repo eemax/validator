@@ -135,6 +135,11 @@ PIPELINE_TARGET_HELP = (
     "Required target to reconstruct, validate, and report. "
     f"Registered targets: {', '.join(PIPELINE_TARGETS)}."
 )
+REPORT_TEMPLATES = {
+    "check": {"default"},
+    "dpp": {"default", "brands"},
+    "md": {"default"},
+}
 DEFAULT_PIPELINE_WEIGHTS = {
     "ingest": 0.10,
     "reconstruct": 0.25,
@@ -620,18 +625,32 @@ def report(
         Path | None,
         typer.Option("--output-dir", "-o", help="Directory for report files."),
     ] = None,
+    template: Annotated[
+        str,
+        typer.Option(
+            "--template",
+            help="Report template. DPP supports: default, brands.",
+        ),
+    ] = "default",
     progress: ProgressOption = None,
 ) -> None:
     """Create reconstruction check or target readiness reports."""
 
     input_file = input_path or _default_validate_output(target)
     output_path = output_dir or _default_report_output_dir(target)
+    _validate_report_template(target, template)
     with ProgressReporter(enabled=progress) as progress_reporter:
-        progress_section(f"Report {target}")
+        progress_section(f"Report {target} ({template})")
         _echo_step(f"Report: reading {target} records from {input_file}")
         run = _read_report_input(input_file, rules, target=target, progress=progress_reporter)
-        _echo_step(f"Report: writing report files to {output_path}")
-        _write_report_for_target(target, run, output_path, progress=progress_reporter)
+        _echo_step(f"Report: writing {template} report files to {output_path}")
+        _write_report_for_target(
+            target,
+            run,
+            output_path,
+            template=template,
+            progress=progress_reporter,
+        )
     if target == "check" and isinstance(run, dict):
         summary = run.get("summary", {})
         _echo_done(
@@ -640,7 +659,7 @@ def report(
         )
         return
     total, _ = _validation_counts(run)
-    _echo_done(f"Wrote {target} reports for {total} records into {output_path}")
+    _echo_done(f"Wrote {target} {template} reports for {total} records into {output_path}")
 
 
 def _run_ingest(
@@ -961,17 +980,36 @@ def _default_report_output_dir(target: str) -> Path:
     return Path("reports") / _target_slug(target)
 
 
+def _validate_report_template(target: str, template: str) -> None:
+    templates = REPORT_TEMPLATES.get(target)
+    if templates is None:
+        if template == "default":
+            return
+        raise typer.BadParameter(
+            f"Template {template!r} is not registered for target {target!r}."
+        )
+    if template not in templates:
+        choices = ", ".join(sorted(templates))
+        raise typer.BadParameter(
+            f"Template {template!r} is not registered for target {target!r}. "
+            f"Available templates: {choices}."
+        )
+
+
 def _write_report_for_target(
     target: str,
     run,
     output_dir: Path,
     *,
+    template: str = "default",
     progress: ProgressReporter | None = None,
 ) -> None:
     if target not in {"check", "dpp"} and has_private_report_hook():
-        report_validation_results(target, run, output_dir, progress=progress)
+        report_validation_results(target, run, output_dir, template=template, progress=progress)
         return
     if target == "check":
+        if template != "default":
+            raise typer.BadParameter("Only the default report template is available for check.")
         if progress is not None:
             progress.emit("Writing check report", "start", message=str(output_dir))
         ReconstructionCheckReporter().write_all(run, output_dir)
@@ -980,8 +1018,12 @@ def _write_report_for_target(
         return
     if target == "dpp":
         if has_private_report_hook():
-            report_validation_results(target, run, output_dir, progress=progress)
+            report_validation_results(target, run, output_dir, template=template, progress=progress)
             return
+        if template != "default":
+            raise typer.BadParameter(
+                "Private reporting is required for DPP report template 'brands'."
+            )
         if progress is not None:
             progress.emit("Writing dpp report", "start", message=str(output_dir))
         DppReadinessReporter().write_all(run, output_dir)
@@ -989,7 +1031,7 @@ def _write_report_for_target(
             progress.emit("Writing dpp report", "finish", message=str(output_dir))
         return
     if has_private_report_hook():
-        report_validation_results(target, run, output_dir, progress=progress)
+        report_validation_results(target, run, output_dir, template=template, progress=progress)
         return
     raise typer.BadParameter(f"Private reporting required for target {target!r}.")
 

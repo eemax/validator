@@ -166,7 +166,14 @@ def validate_projected_products(target, payloads, *, rules=None, progress=None):
     ...
 
 
-def report_validation_results(target, validation_result, output_dir, *, progress=None):
+def report_validation_results(
+    target,
+    validation_result,
+    output_dir,
+    *,
+    template="default",
+    progress=None,
+):
     ...
 ```
 
@@ -195,11 +202,19 @@ uv run centric-mdm report \
   --output-dir reports/dpp-readiness
 ```
 
+Alternative report templates can be selected without changing the target contract:
+
+```bash
+uv run centric-mdm report --target dpp --template brands
+```
+
 Outputs:
 
 - `reports/dpp-readiness/dpp-summary.md`
 - `reports/dpp-readiness/dpp-summary.xlsx`
 - `reports/dpp-readiness/dpp-issues.xlsx`
+- `reports/dpp-readiness/brands/index.xlsx` and one `*-dpp-issues.xlsx` per brand when using
+  `--template brands`.
 
 ## Create MD Reports
 

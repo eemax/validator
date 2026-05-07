@@ -352,6 +352,57 @@ def report_validation_results(target, validation_result, output_dir):
     ) == "packaging:7"
 
 
+def test_report_passes_registered_template_to_private_hook(tmp_path, monkeypatch) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("CENTRIC_CONFIG_DIR", str(config_dir))
+    monkeypatch.chdir(tmp_path)
+    (config_dir / "reconstruction.py").write_text(
+        """
+from pathlib import Path
+
+def report_validation_results(target, validation_result, output_dir, *, template="default"):
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    Path(output_dir, "template.txt").write_text(
+        f"{target}:{template}:{validation_result['total_products']}",
+        encoding="utf-8",
+    )
+""",
+        encoding="utf-8",
+    )
+    result_path = tmp_path / "data" / "results" / "dpp-readiness-results.json"
+    result_path.parent.mkdir(parents=True)
+    result_path.write_text(
+        json.dumps(
+            {
+                "rule_set_version": "dpp-rules",
+                "total_products": 7,
+                "ready_products": 5,
+                "readiness_percent": 71.43,
+                "results": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report_result = CliRunner().invoke(
+        app,
+        ["report", "--target", "dpp", "--template", "brands"],
+    )
+
+    assert report_result.exit_code == 0
+    assert (tmp_path / "reports" / "dpp-readiness" / "template.txt").read_text(
+        encoding="utf-8"
+    ) == "dpp:brands:7"
+
+
+def test_report_rejects_unregistered_template_for_target() -> None:
+    result = CliRunner().invoke(app, ["report", "--target", "md", "--template", "brands"])
+
+    assert result.exit_code == 2
+    assert "Template 'brands' is not registered for target 'md'" in result.output
+
+
 def test_pipeline_requires_explicit_target(tmp_path) -> None:
     result = CliRunner().invoke(app, ["pipeline", "--raw-dir", str(tmp_path / "raw")])
 
