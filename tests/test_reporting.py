@@ -60,8 +60,8 @@ def test_reconstruction_check_reporter_writes_single_summary_and_workbook(
         "Definitions",
     ]
     issue_rows = list(workbook["Issues"].iter_rows(values_only=True))
-    assert issue_rows[0] == ("code", "severity", "bucket", "count")
+    assert issue_rows[0] == ("Code", "Severity", "Bucket", "Count")
     assert any(row[0] == "REFERENCED_RECORD_NOT_SEEN" for row in issue_rows[1:])
     unresolved_rows = list(workbook["Unresolved Refs"].iter_rows(values_only=True))
-    assert unresolved_rows[0] == ("relationship", "target_endpoint", "status", "count")
+    assert unresolved_rows[0] == ("Relationship", "Target Endpoint", "Status", "Count")
     assert any(row[2] == "not_seen" for row in unresolved_rows[1:])

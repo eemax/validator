@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -7,8 +8,37 @@ from typing import Any
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.table import Table, TableStyleInfo
 
 from centric_mdm_validation.models import ProductValidationResult, ValidationRunResult
+
+HEADER_LABELS = {
+    "bucket": "Bucket",
+    "code": "Code",
+    "count": "Count",
+    "coverage_percent": "Coverage %",
+    "declared_refs": "Declared Refs",
+    "definition": "Definition",
+    "endpoint": "Endpoint",
+    "invalid_refs": "Invalid Refs",
+    "metric": "Metric",
+    "missing_refs": "Missing Refs",
+    "records": "Records",
+    "relationship": "Relationship",
+    "seen_refs": "Seen Refs",
+    "severity": "Severity",
+    "source_endpoint": "Source Endpoint",
+    "source_records": "Source Records",
+    "source_records_with_missing_refs": "Source Records With Missing Refs",
+    "source_records_with_refs": "Source Records With Refs",
+    "status": "Status",
+    "target_endpoint": "Target Endpoint",
+    "term": "Term",
+    "value": "Value",
+}
+DISPLAY_HEADER_KEYS = {label: key for key, label in HEADER_LABELS.items()}
+PERCENT_HEADERS = {"coverage_percent"}
+HIDDEN_HEADERS = {"bucket", "severity"}
 
 
 class ReconstructionCheckReporter:
@@ -269,15 +299,15 @@ class ReconstructionCheckReporter:
         ]
 
     def _append_rows(self, sheet, headers, rows) -> None:
-        sheet.append(list(headers))
+        sheet.append([self._display_header(header) for header in headers])
         for row in rows:
             sheet.append([row.get(header) for header in headers])
 
     def _format_workbook(self, workbook: Workbook) -> None:
-        for sheet in workbook.worksheets:
-            self._format_sheet(sheet)
+        for index, sheet in enumerate(workbook.worksheets, start=1):
+            self._format_sheet(sheet, table_index=index)
 
-    def _format_sheet(self, sheet) -> None:
+    def _format_sheet(self, sheet, *, table_index: int) -> None:
         header_fill = PatternFill("solid", fgColor="1F4E78")
         header_font = Font(bold=True, color="FFFFFF")
         border = Border(bottom=Side(style="hair", color="D9E2F3"))
@@ -288,13 +318,26 @@ class ReconstructionCheckReporter:
         for row in sheet.iter_rows(min_row=2):
             for cell in row:
                 cell.border = border
-                cell.alignment = Alignment(vertical="top", wrap_text=cell.column >= 4)
+                header = self._header_key(str(sheet.cell(row=1, column=cell.column).value or ""))
+                cell.alignment = Alignment(
+                    vertical="top",
+                    wrap_text=cell.column >= 4,
+                    horizontal="right" if self._is_numeric_header(header) else "left",
+                )
+                if header in PERCENT_HEADERS and isinstance(cell.value, (int, float)):
+                    cell.number_format = '0.00"%"'
+                elif self._is_numeric_header(header) and isinstance(cell.value, (int, float)):
+                    cell.number_format = "#,##0"
         sheet.freeze_panes = "A2"
         sheet.auto_filter.ref = sheet.dimensions
         for column_index in range(1, sheet.max_column + 1):
             letter = get_column_letter(column_index)
             width = self._column_width(sheet, column_index)
             sheet.column_dimensions[letter].width = width
+            header = self._header_key(str(sheet.cell(row=1, column=column_index).value or ""))
+            if header in HIDDEN_HEADERS:
+                sheet.column_dimensions[letter].hidden = True
+        self._add_table(sheet, table_index=table_index)
 
     def _column_width(self, sheet, column_index: int) -> int:
         values = [
@@ -303,3 +346,38 @@ class ReconstructionCheckReporter:
         ]
         max_length = max((len(value) for value in values), default=10)
         return min(max(max_length + 2, 12), 70)
+
+    def _display_header(self, header: str) -> str:
+        return HEADER_LABELS.get(header, header.replace("_", " ").title())
+
+    def _header_key(self, header: str) -> str:
+        if header in DISPLAY_HEADER_KEYS:
+            return DISPLAY_HEADER_KEYS[header]
+        return header.strip().lower().replace("%", "percent").replace(" ", "_")
+
+    def _is_numeric_header(self, header: str) -> bool:
+        return header in PERCENT_HEADERS or any(
+            hint in header
+            for hint in (
+                "count",
+                "records",
+                "refs",
+                "coverage_percent",
+                "value",
+            )
+        )
+
+    def _add_table(self, sheet, *, table_index: int) -> None:
+        if sheet.max_row < 2 or sheet.max_column < 1:
+            return
+        ref = f"A1:{get_column_letter(sheet.max_column)}{sheet.max_row}"
+        name_base = re.sub(r"[^A-Za-z0-9_]", "_", sheet.title)
+        table = Table(displayName=f"Table_{table_index}_{name_base}"[:255], ref=ref)
+        table.tableStyleInfo = TableStyleInfo(
+            name="TableStyleMedium2",
+            showFirstColumn=False,
+            showLastColumn=False,
+            showRowStripes=True,
+            showColumnStripes=False,
+        )
+        sheet.add_table(table)
