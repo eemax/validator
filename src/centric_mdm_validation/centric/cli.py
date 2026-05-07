@@ -27,7 +27,7 @@ from .models import EndpointSpec, FetchProgressEvent, FetchRunResult
 _DELTA_STATE_VERSION = 1
 _DEFAULT_DELTA_STATE_CONFIG_PATH = Path("delta_fetcher.yml")
 _DEFAULT_FETCHER_CONFIG_PATH = Path("config/fetcher.yml")
-_DEFAULT_DELTA_LOG_PATH = Path("data/delta.log")
+_DEFAULT_DELTA_LOG_PATH = Path("data/logs/delta.log")
 _DEFAULT_FETCH_LOG_PATH = Path("fetcher.log")
 _DEFAULT_DELTA_OVERLAP_MINUTES = 60
 _DEFAULT_DELTA_OVERLAP_DAYS = 0

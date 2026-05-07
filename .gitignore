@@ -34,9 +34,13 @@ build/
 data/checkpoints/*
 data/raw/*
 data/results/*
+data/logs/*
+data/locks/*
 reports/*
 
 !data/checkpoints/.gitkeep
 !data/raw/.gitkeep
 !data/results/.gitkeep
+!data/logs/.gitkeep
+!data/locks/.gitkeep
 !reports/.gitkeep

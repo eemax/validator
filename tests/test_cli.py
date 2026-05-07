@@ -12,6 +12,7 @@ def test_top_level_help_shows_workflow_and_targets() -> None:
     assert "raw endpoint files" in result.output
     assert "check/dpp/md records" in result.output
     assert "centric-mdm examples" in result.output
+    assert "delta-daemon" in result.output
 
 
 def test_examples_command_prints_common_workflows() -> None:
@@ -21,6 +22,15 @@ def test_examples_command_prints_common_workflows() -> None:
     assert "Default aggregate check" in result.output
     assert "pipeline --target dpp" in result.output
     assert "pipeline --target md" in result.output
+    assert "delta-daemon --schedule" in result.output
+
+
+def test_delta_daemon_invalid_schedule_prints_cron_guidance() -> None:
+    result = CliRunner().invoke(app, ["delta-daemon", "--schedule", "hourly"])
+
+    assert result.exit_code == 1
+    assert "5-field cron syntax" in result.output
+    assert "hourly:       0 * * * *" in result.output
 
 
 def test_fetch_help_routes_to_fetcher_options() -> None:

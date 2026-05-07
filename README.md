@@ -254,6 +254,23 @@ Run a fresh delta window with:
 uv run centric-mdm fetch --delta
 ```
 
+Run recurring delta fetches in the foreground on a local-time cron schedule:
+
+```bash
+uv run centric-mdm delta-daemon --schedule "0 * * * *"
+```
+
+The daemon waits for the next scheduled clock time, runs `fetch --delta`, logs each run, then
+waits again. It uses local timezone only. Useful schedules:
+
+```text
+0 * * * *      hourly at minute 0
+*/30 * * * *   every 30 minutes on the clock
+0 */2 * * *    every two hours
+0 0,12 * * *   twice daily
+0 3 * * *      daily at 03:00
+```
+
 On macOS, keep the machine from idle sleeping while fetch is running:
 
 ```bash
@@ -290,6 +307,13 @@ Useful modes inherited from the standalone fetcher:
 - By default, fetch prints a human-readable completion summary. Use `--json` when a script needs
   line-delimited JSON endpoint result records.
 - `--log-level summary|http|debug` enables structured fetch logs.
+
+Delta daemon operational files:
+
+- `data/locks/delta-daemon.lock`: prevents overlapping daemon fetches.
+- `data/logs/delta-daemon.log`: human-readable daemon activity log.
+- `data/logs/delta-runs.jsonl`: JSONL daemon run history.
+- `data/logs/delta.log`: fetcher's delta endpoint/run log.
 
 ## Project Boundary
 

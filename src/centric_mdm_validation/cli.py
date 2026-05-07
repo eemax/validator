@@ -27,6 +27,14 @@ from centric_mdm_validation.centric.store import (
     run_reconstruction_coverage_check,
     write_target_reconstruction,
 )
+from centric_mdm_validation.delta_daemon import (
+    DEFAULT_DELTA_DAEMON_LOCK_PATH,
+    DEFAULT_DELTA_DAEMON_LOG_PATH,
+    DEFAULT_DELTA_RUNS_LOG_PATH,
+    DeltaDaemonError,
+    DeltaDaemonOptions,
+    run_delta_daemon,
+)
 from centric_mdm_validation.io import read_json_records, write_json
 from centric_mdm_validation.models import (
     CentricProductPayload,
@@ -198,6 +206,9 @@ Fetch data:
   uv run centric-mdm fetch --delta
   uv run centric-mdm fetch --delta --json
 
+Run recurring delta fetches:
+  uv run centric-mdm delta-daemon --schedule "0 * * * *"
+
 More help:
   uv run centric-mdm --help
   uv run centric-mdm pipeline --help
@@ -232,6 +243,84 @@ def examples() -> None:
     """Show copy-paste examples for common workflows."""
 
     typer.echo(dedent(EXAMPLES_TEXT).strip())
+
+
+@app.command("delta-daemon")
+def delta_daemon(
+    schedule: Annotated[
+        str,
+        typer.Option(
+            "--schedule",
+            help=(
+                "5-field local-time cron schedule for delta fetches, for example "
+                "'0 * * * *' hourly or '*/30 * * * *' every 30 minutes."
+            ),
+        ),
+    ],
+    endpoint: Annotated[
+        list[str] | None,
+        typer.Option("--endpoint", "-e", help="Endpoint name to fetch. Repeat for multiple."),
+    ] = None,
+    config: Annotated[
+        Path | None,
+        typer.Option("--config", help="Fetcher config path."),
+    ] = None,
+    params: Annotated[
+        Path | None,
+        typer.Option("--params", help="Private fetch params YAML."),
+    ] = None,
+    delta_state_file: Annotated[
+        Path | None,
+        typer.Option("--delta-state-file", help="Delta state YAML path."),
+    ] = None,
+    output_dir: Annotated[
+        Path | None,
+        typer.Option("--output-dir", help="Override fetcher output directory."),
+    ] = None,
+    checkpoint_dir: Annotated[
+        Path | None,
+        typer.Option("--checkpoint-dir", help="Override fetcher checkpoint directory."),
+    ] = None,
+    lock_file: Annotated[
+        Path,
+        typer.Option("--lock-file", help="Delta daemon lock file."),
+    ] = DEFAULT_DELTA_DAEMON_LOCK_PATH,
+    log_file: Annotated[
+        Path,
+        typer.Option("--log-file", help="Human-readable delta daemon log file."),
+    ] = DEFAULT_DELTA_DAEMON_LOG_PATH,
+    runs_log_file: Annotated[
+        Path,
+        typer.Option("--runs-log-file", help="JSONL delta daemon run history file."),
+    ] = DEFAULT_DELTA_RUNS_LOG_PATH,
+    max_runs: Annotated[
+        int | None,
+        typer.Option("--max-runs", hidden=True),
+    ] = None,
+) -> None:
+    """Run the delta fetcher on a foreground local-time cron schedule."""
+
+    options = DeltaDaemonOptions(
+        schedule=schedule,
+        endpoints=endpoint or [],
+        config=config,
+        params=params,
+        delta_state_file=delta_state_file,
+        output_dir=output_dir,
+        checkpoint_dir=checkpoint_dir,
+        lock_file=lock_file,
+        log_file=log_file,
+        runs_log_file=runs_log_file,
+    )
+    try:
+        raise typer.Exit(run_delta_daemon(options, max_runs=max_runs))
+    except DeltaDaemonError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        _echo_cron_help(err=True)
+        raise typer.Exit(1) from exc
+    except KeyboardInterrupt:
+        typer.echo("Delta daemon stopped by user.", err=True)
+        raise typer.Exit(130) from None
 
 
 @app.command()
@@ -685,6 +774,14 @@ def _run_caffeinated_fetch(args: list[str]) -> None:
         *args[1:],
     ]
     raise typer.Exit(subprocess.call(command, env=env))
+
+
+def _echo_cron_help(*, err: bool = False) -> None:
+    typer.echo("Use 5-field cron syntax: minute hour day-of-month month day-of-week", err=err)
+    typer.echo("Examples:", err=err)
+    typer.echo("  hourly:       0 * * * *", err=err)
+    typer.echo("  every 30 min: */30 * * * *", err=err)
+    typer.echo("  daily 03:00:  0 3 * * *", err=err)
 
 
 def _echo_reconstruction_runtime(target: str) -> None:
