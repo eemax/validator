@@ -30,6 +30,8 @@ def test_fetch_help_routes_to_fetcher_options() -> None:
     assert "usage: centric-mdm fetch run" in result.output
     assert "--config" in result.output
     assert "--delta" in result.output
+    assert "--days" in result.output
+    assert "--json" in result.output
 
 
 def test_fetch_without_args_uses_default_config(monkeypatch) -> None:
@@ -126,6 +128,21 @@ def test_ingest_command_prints_file_progress(tmp_path) -> None:
     assert "Ingest: [1/1] applying styles" in result.output
     assert "Ingest: [1/1] applied styles: 1 records, 1 upserts, 0 deletes" in result.output
     assert "OK Ingested 1 raw files" in result.output
+
+    second_result = CliRunner().invoke(
+        app,
+        [
+            "ingest",
+            "--raw-dir",
+            str(raw_dir),
+            "--db",
+            str(db_path),
+        ],
+    )
+
+    assert second_result.exit_code == 0
+    assert "skipped already-applied" not in second_result.output
+    assert "OK Ingested 0 raw files" in second_result.output
 
 
 def test_reconstruct_command_defaults_to_check_target(tmp_path, monkeypatch) -> None:

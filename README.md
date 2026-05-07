@@ -118,8 +118,8 @@ Endpoint merge behavior lives in `config/endpoint-schema.yml`. Each endpoint can
 primary key, modified timestamp fields, inactive/tombstone handling, and full-file semantics.
 The current full-file mode is `upsert_only`: a non-delta file updates records it contains, but
 does not delete records merely because they are absent from that file. This is intentional for
-month-window fetches such as `--months 2`, which are filtered windows rather than authoritative
-endpoint replacements.
+window fetches such as `--days 60` or `--months 2`, which are filtered windows rather than
+authoritative endpoint replacements.
 
 The DuckDB store keeps raw JSON payload text for the current endpoint record while also deriving
 typed timestamp columns and current-state views. `current_endpoint_records` exposes all current
@@ -242,6 +242,12 @@ Run the fetcher through the main CLI:
 uv run centric-mdm fetch --endpoint styles
 ```
 
+Run a filtered catch-up window with:
+
+```bash
+uv run centric-mdm fetch --days 60
+```
+
 Run a fresh delta window with:
 
 ```bash
@@ -273,10 +279,16 @@ Useful modes inherited from the standalone fetcher:
   (`CENTRIC_CONFIG_DIR/delta_fetcher.yml` or `.local/delta_fetcher.yml` by default) and writes
   `data/raw/runs/<run-id>/<endpoint>.delta.jsonl`.
 - `--delta-dry-run` shows injected delta filters without fetching data.
+- `--days 60` fetches records modified in the last 60 days and writes
+  `data/raw/runs/<run-id>-days60/<endpoint>.jsonl`.
 - `--months 24` fetches records modified in the last 24 calendar months and writes
   `data/raw/runs/<run-id>-months24/<endpoint>.jsonl`.
-- Delta and month-window run folders include `manifest.json` with run mode, selected endpoints,
+- `--days` and `--months` are mutually exclusive. Prefer `--days` for operational catch-up runs
+  where an exact duration is clearer.
+- Delta and window run folders include `manifest.json` with run mode, selected endpoints,
   per-endpoint output files, counts, status, and filter metadata.
+- By default, fetch prints a human-readable completion summary. Use `--json` when a script needs
+  line-delimited JSON endpoint result records.
 - `--log-level summary|http|debug` enables structured fetch logs.
 
 ## Project Boundary

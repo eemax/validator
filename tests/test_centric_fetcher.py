@@ -121,6 +121,45 @@ def test_count_preflight_and_id_validation_pass(tmp_path: Path, no_sleep: None) 
     assert result.id_validation_unique_ids == 50
 
 
+def test_page_progress_includes_rolling_eta(tmp_path: Path, no_sleep: None, monkeypatch) -> None:
+    perf_values = iter([10.0, 11.0, 20.0, 22.0])
+    monkeypatch.setattr(
+        "centric_mdm_validation.centric.fetcher._monotonic_seconds",
+        lambda: next(perf_values),
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v2/items/count":
+            return httpx.Response(200, json={"total": 100})
+        if request.url.path == "/api/v2/items":
+            skip = int(request.url.params["skip"])
+            return httpx.Response(200, json=[{"id": skip + i} for i in range(50)])
+        return httpx.Response(404)
+
+    endpoint = EndpointSpec(
+        name="items",
+        api_version="v2",
+        path="items",
+        limit=50,
+        count_spec=CountSpec(api_version="v2", path="items/count", result_path="$.total"),
+    )
+    ctx = _make_auth_ctx(tmp_path, handler)
+    cfg = _make_fetcher_cfg(tmp_path)
+    events = []
+
+    run_endpoint(endpoint, ctx, cfg, resume=False, progress_callback=events.append)
+
+    page_events = [event for event in events if event.kind == "page_fetched"]
+    assert len(page_events) == 2
+    assert page_events[0].expected_pages == 2
+    assert page_events[0].page_duration_seconds == 1.0
+    assert page_events[0].rolling_avg_seconds == 1.0
+    assert page_events[0].estimated_remaining_seconds == 1.0
+    assert page_events[1].page_duration_seconds == 2.0
+    assert page_events[1].rolling_avg_seconds == 1.5
+    assert page_events[1].estimated_remaining_seconds == 0.0
+
+
 def test_duplicate_ids_fail_integrity_when_count_matches(tmp_path: Path, no_sleep: None) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/v2/items/count":

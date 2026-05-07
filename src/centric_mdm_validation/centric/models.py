@@ -81,7 +81,11 @@ class FetchProgressEvent:
     start_skip: int | None = None
     limit: int | None = None
     expected_count: int | None = None
+    expected_pages: int | None = None
     percent_complete: float | None = None
+    page_duration_seconds: float | None = None
+    rolling_avg_seconds: float | None = None
+    estimated_remaining_seconds: float | None = None
     retries_used: int | None = None
     elapsed_seconds: float | None = None
     warnings_count: int | None = None

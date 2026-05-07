@@ -194,7 +194,9 @@ Run steps manually:
 
 Fetch data:
   uv run centric-mdm fetch --endpoint styles
+  uv run centric-mdm fetch --days 60
   uv run centric-mdm fetch --delta
+  uv run centric-mdm fetch --delta --json
 
 More help:
   uv run centric-mdm --help
@@ -597,13 +599,27 @@ def _rich_ingest_progress(progress: ProgressReporter):
                 unit="files",
             )
             return
-        if event.action in {"skipped", "applied"}:
+        if event.action == "skipped":
             progress.emit(
                 "Ingesting raw files",
                 "update",
                 current=event.file_index,
                 total=event.total_files,
-                message=event.raw_file.endpoint,
+            )
+            return
+        if event.action == "applied":
+            progress.emit(
+                "Ingesting raw files",
+                "update",
+                current=event.file_index,
+                total=event.total_files,
+            )
+            path = event.raw_file.path
+            suffix = " delta" if event.raw_file.is_delta else ""
+            progress_message(
+                f"      Ingested {event.raw_file.endpoint}{suffix} from {path}: "
+                f"{event.records_read} records, {event.records_upserted} upserts, "
+                f"{event.records_deleted} deletes"
             )
 
     return _callback
@@ -618,7 +634,6 @@ def _echo_ingest_progress(event: IngestFileProgress) -> None:
         typer.echo(f"{prefix} applying {event.raw_file.endpoint}{suffix} from {path}{run}")
         return
     if event.action == "skipped":
-        typer.echo(f"{prefix} skipped already-applied {event.raw_file.endpoint} from {path}{run}")
         return
     if event.action == "applied":
         typer.echo(

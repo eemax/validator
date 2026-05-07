@@ -34,6 +34,8 @@ _DEFAULT_DELTA_OVERLAP_DAYS = 0
 _MAX_DELTA_OVERLAP_DAYS = 1000
 _MIN_MONTHS_BACK = 1
 _MAX_MONTHS_BACK = 120
+_MIN_DAYS_BACK = 1
+_MAX_DAYS_BACK = 3650
 _RUN_INTERRUPTED_MESSAGE = "interrupted by user (Ctrl+C)."
 _SAFE_NAME_PATTERN = re.compile(r"[^A-Za-z0-9_.-]+")
 _LOG_LEVEL_RANKS: dict[str, int] = {
@@ -61,8 +63,8 @@ def _delta_run_id(value: datetime) -> str:
     return value.astimezone(UTC).strftime("%Y-%m-%dT%H%M%SZ")
 
 
-def _window_run_id(value: datetime, months: int) -> str:
-    return f"{_delta_run_id(value)}-months{months}"
+def _window_run_id(value: datetime, unit: str, amount: int) -> str:
+    return f"{_delta_run_id(value)}-{unit}{amount}"
 
 
 def _parse_utc_iso(value: Any) -> datetime | None:
@@ -283,6 +285,24 @@ def _subtract_calendar_months(value: datetime, months: int) -> datetime:
     return value.replace(year=year, month=month, day=day)
 
 
+def _resolve_fetch_window(args: argparse.Namespace) -> tuple[str | None, int | None]:
+    if args.days is not None and args.months is not None:
+        raise ConfigError("Use either --days or --months, not both.")
+    if args.days is not None:
+        return "days", args.days
+    if args.months is not None:
+        return "months", args.months
+    return None, None
+
+
+def _window_modified_since(value: datetime, unit: str, amount: int) -> str:
+    if unit == "days":
+        return _utc_iso(value - timedelta(days=amount))
+    if unit == "months":
+        return _utc_iso(_subtract_calendar_months(value, amount))
+    raise ValueError(f"Unsupported fetch window unit: {unit}")
+
+
 def _apply_modified_since_filter(spec: EndpointSpec, modified_since: str) -> EndpointSpec:
     query_params = strip_modified_at_filters(spec.query_params)
     query_params["_modified_at=ge"] = modified_since
@@ -304,6 +324,18 @@ def _parse_months_back(value: str) -> int:
     if parsed < _MIN_MONTHS_BACK or parsed > _MAX_MONTHS_BACK:
         raise argparse.ArgumentTypeError(
             f"--months must be between {_MIN_MONTHS_BACK} and {_MAX_MONTHS_BACK}."
+        )
+    return parsed
+
+
+def _parse_days_back(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("--days must be an integer.") from exc
+    if parsed < _MIN_DAYS_BACK or parsed > _MAX_DAYS_BACK:
+        raise argparse.ArgumentTypeError(
+            f"--days must be between {_MIN_DAYS_BACK} and {_MAX_DAYS_BACK}."
         )
     return parsed
 
@@ -415,19 +447,34 @@ def _build_parser() -> argparse.ArgumentParser:
         help="macOS only: prevent idle sleep while fetch is running.",
     )
     run_parser.add_argument(
+        "--days",
+        type=_parse_days_back,
+        default=None,
+        metavar=f"{_MIN_DAYS_BACK}-{_MAX_DAYS_BACK}",
+        help=(
+            f"Non-delta mode only: fetch records modified in the last N days "
+            f"({_MIN_DAYS_BACK}-{_MAX_DAYS_BACK}). Cannot be combined with --months."
+        ),
+    )
+    run_parser.add_argument(
         "--months",
         type=_parse_months_back,
         default=None,
         metavar=f"{_MIN_MONTHS_BACK}-{_MAX_MONTHS_BACK}",
         help=(
             f"Non-delta mode only: fetch records modified in the last N calendar months "
-            f"({_MIN_MONTHS_BACK}-{_MAX_MONTHS_BACK})."
+            f"({_MIN_MONTHS_BACK}-{_MAX_MONTHS_BACK}). Cannot be combined with --days."
         ),
     )
     run_parser.add_argument(
         "--quiet",
         action="store_true",
-        help="Suppress live progress and final summary on stderr.",
+        help="Suppress live progress and the human final summary.",
+    )
+    run_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSONL endpoint result records instead of the human summary.",
     )
     run_parser.add_argument(
         "--log-level",
@@ -476,6 +523,20 @@ def _format_seconds(value: float | None) -> str:
     return f"{seconds:.2f}s"
 
 
+def _format_fetch_duration(value: float | None) -> str:
+    if value is None:
+        return "unknown"
+    if value < 1:
+        return f"{value * 1000:.0f}ms"
+    if value < 60:
+        return f"{value:.1f}s"
+    minutes, seconds = divmod(int(round(value)), 60)
+    if minutes < 60:
+        return f"{minutes}m {seconds:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m"
+
+
 def _write_progress_line(event: FetchProgressEvent) -> None:
     if event.kind == "endpoint_start":
         expected = event.expected_count if event.expected_count is not None else "unknown"
@@ -488,13 +549,20 @@ def _write_progress_line(event: FetchProgressEvent) -> None:
         return
 
     if event.kind == "page_fetched":
+        page_label = str(event.page_index)
+        if event.expected_pages is not None:
+            page_label = f"{page_label}/{event.expected_pages}"
         line = (
-            f"[{event.endpoint}] page {event.page_index}: page_items={event.page_items} "
+            f"[{event.endpoint}] page {page_label}: page_items={event.page_items} "
             f"total_items={event.items_fetched} skip={event.skip} next_skip={event.next_skip} "
             f"elapsed={_format_seconds(event.elapsed_seconds)}"
         )
         if event.percent_complete is not None:
             line += f" progress={event.percent_complete:.1f}%"
+        if event.rolling_avg_seconds is not None:
+            line += f" avg_page={_format_fetch_duration(event.rolling_avg_seconds)}"
+        if event.estimated_remaining_seconds is not None:
+            line += f" eta={_format_fetch_duration(event.estimated_remaining_seconds)}"
         print(line, file=sys.stderr)
         return
 
@@ -511,27 +579,207 @@ def _write_progress_line(event: FetchProgressEvent) -> None:
         )
 
 
-def _print_run_summary(
+def _fetch_result_record(result: FetchRunResult) -> dict[str, Any]:
+    return {
+        "endpoint": result.endpoint,
+        "status": "ok",
+        "pages_fetched": result.pages_fetched,
+        "items_fetched": result.items_fetched,
+        "expected_count": result.expected_count,
+        "count_validation": {
+            "status": result.count_validation_status,
+            "reason": result.count_validation_reason,
+        },
+        "retries_used": result.retries_used,
+        "start_skip": result.start_skip,
+        "next_skip": result.next_skip,
+        "duration_seconds": round(result.duration_seconds, 3),
+        "output_file": str(result.output_file),
+        "checkpoint_file": str(result.checkpoint_file),
+        "id_validation": {
+            "status": result.id_validation_status,
+            "checked_items": result.id_validation_checked_items,
+            "unique_ids": result.id_validation_unique_ids,
+            "reason": result.id_validation_reason,
+        },
+        "warnings": result.warnings,
+    }
+
+
+def _fetch_failure_record(endpoint: str, message: str) -> dict[str, Any]:
+    return {
+        "endpoint": endpoint,
+        "status": "failed",
+        "error": message,
+    }
+
+
+def _print_json_run_records(
+    results: list[FetchRunResult],
+    failures: list[tuple[str, str]],
+) -> None:
+    for result in results:
+        print(json.dumps(_fetch_result_record(result)))
+    for endpoint, message in failures:
+        print(json.dumps(_fetch_failure_record(endpoint, message)))
+
+
+def _plural(value: int, singular: str, plural: str | None = None) -> str:
+    word = singular if value == 1 else (plural or f"{singular}s")
+    return f"{value} {word}"
+
+
+def _human_fetch_mode_label(
+    args: argparse.Namespace,
+    non_delta_window_unit: str | None,
+) -> str:
+    if args.delta_dry_run:
+        return "delta dry-run"
+    if args.delta:
+        return "delta"
+    if non_delta_window_unit == "days":
+        return f"days window ({_plural(args.days, 'day')})"
+    if non_delta_window_unit == "months":
+        return f"months window ({_plural(args.months, 'month')})"
+    return "standard"
+
+
+def _common_output_dir(results: list[FetchRunResult]) -> Path | None:
+    if not results:
+        return None
+    output_dirs = {result.output_file.parent for result in results}
+    if len(output_dirs) == 1:
+        return next(iter(output_dirs))
+    return None
+
+
+def _display_output_file(result: FetchRunResult, output_dir: Path | None) -> str:
+    if output_dir is not None:
+        try:
+            return str(result.output_file.relative_to(output_dir))
+        except ValueError:
+            pass
+    return str(result.output_file)
+
+
+def _validation_status_counts(results: list[FetchRunResult], field_name: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for result in results:
+        status = str(getattr(result, field_name))
+        counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+def _format_status_counts(counts: dict[str, int]) -> str:
+    if not counts:
+        return "none"
+    ordered_keys = ["passed", "skipped", "failed", "not_run"]
+    parts = [
+        f"{counts[key]} {key.replace('_', ' ')}"
+        for key in ordered_keys
+        if counts.get(key, 0) > 0
+    ]
+    parts.extend(
+        f"{count} {key.replace('_', ' ')}"
+        for key, count in sorted(counts.items())
+        if key not in ordered_keys and count > 0
+    )
+    return ", ".join(parts)
+
+
+def _print_human_run_summary(
+    *,
+    args: argparse.Namespace,
     selected_count: int,
     results: list[FetchRunResult],
     failures: list[tuple[str, str]],
     duration_seconds: float,
+    run_id: str | None,
+    run_output_dir: Path | None,
+    non_delta_window_unit: str | None,
 ) -> None:
+    output_dir = run_output_dir or _common_output_dir(results)
     total_items = sum(result.items_fetched for result in results)
     total_pages = sum(result.pages_fetched for result in results)
     total_retries = sum(result.retries_used for result in results)
-    print("Run summary:", file=sys.stderr)
-    print(f"  endpoints_total: {selected_count}", file=sys.stderr)
-    print(f"  endpoints_succeeded: {len(results)}", file=sys.stderr)
-    print(f"  endpoints_failed: {len(failures)}", file=sys.stderr)
-    print(f"  total_items: {total_items}", file=sys.stderr)
-    print(f"  total_pages: {total_pages}", file=sys.stderr)
-    print(f"  total_retries: {total_retries}", file=sys.stderr)
-    print(f"  duration: {_format_seconds(duration_seconds)}", file=sys.stderr)
+    total_warnings = sum(len(result.warnings) for result in results)
+    title = "Fetch Complete" if not failures else "Fetch Finished With Failures"
+
+    print(title)
+    print()
+    print(f"Mode: {_human_fetch_mode_label(args, non_delta_window_unit)}")
+    if run_id is not None:
+        print(f"Run:  {run_id}")
+    if output_dir is not None:
+        print(f"Raw:  {output_dir}")
+    print()
+    print("Summary")
+    print(f"Endpoints: {len(results)} ok, {len(failures)} failed, {selected_count} total")
+    print(f"Records:   {total_items} fetched")
+    print(f"Pages:     {total_pages} fetched")
+    print(f"Time:      {_format_fetch_duration(duration_seconds)}")
+    print(f"Retries:   {total_retries}")
+    if total_warnings:
+        print(f"Warnings:  {total_warnings}")
+
+    if results:
+        endpoint_width = max(len("Endpoint"), *(len(result.endpoint) for result in results))
+        file_width = max(
+            len("File"),
+            *(
+                len(_display_output_file(result, output_dir))
+                for result in results
+            ),
+        )
+        header = (
+            f"{'Endpoint':<{endpoint_width}}  {'Records':>7}  {'Expected':>8}  "
+            f"{'Pages':>5}  {'Time':>7}  {'File':<{file_width}}"
+        )
+        print()
+        print(header)
+        print("-" * len(header))
+        for result in results:
+            expected = (
+                str(result.expected_count)
+                if result.expected_count is not None
+                else "unknown"
+            )
+            print(
+                f"{result.endpoint:<{endpoint_width}}  "
+                f"{result.items_fetched:>7}  "
+                f"{expected:>8}  "
+                f"{result.pages_fetched:>5}  "
+                f"{_format_fetch_duration(result.duration_seconds):>7}  "
+                f"{_display_output_file(result, output_dir):<{file_width}}"
+            )
+
+    print()
+    print("Validation")
+    print(
+        "Count checks: "
+        f"{_format_status_counts(_validation_status_counts(results, 'count_validation_status'))}"
+    )
+    print(
+        "ID checks:    "
+        f"{_format_status_counts(_validation_status_counts(results, 'id_validation_status'))}"
+    )
+
+    warning_rows = [
+        (result.endpoint, warning)
+        for result in results
+        for warning in result.warnings
+    ]
+    if warning_rows:
+        print()
+        print("Warnings")
+        for endpoint, warning in warning_rows:
+            print(f"- {endpoint}: {warning}")
+
     if failures:
-        print("  failed_endpoints:", file=sys.stderr)
+        print()
+        print("Failures")
         for endpoint, message in failures:
-            print(f"    - {endpoint}: {message}", file=sys.stderr)
+            print(f"- {endpoint}: {message}")
 
 
 def _build_delta_run_summary_record(
@@ -959,6 +1207,7 @@ def _finalize_run(
     delta_endpoint_records: list[dict[str, Any]],
     run_output_dir: Path | None,
     run_id: str | None,
+    non_delta_window_unit: str | None,
     non_delta_modified_since: str | None,
     log_callback: LogCallback | None,
 ) -> int:
@@ -980,7 +1229,7 @@ def _finalize_run(
         _write_run_manifest(
             output_dir=run_output_dir,
             run_id=run_id,
-            mode="delta" if args.delta else "months",
+            mode="delta" if args.delta else (non_delta_window_unit or "standard"),
             run_started_at=run_started_dt,
             run_finished_at=run_finished_dt,
             selected_specs=selected_specs,
@@ -990,43 +1239,19 @@ def _finalize_run(
             modified_since=non_delta_modified_since,
         )
 
-    for result in results:
-        print(
-            json.dumps(
-                {
-                    "endpoint": result.endpoint,
-                    "status": "ok",
-                    "pages_fetched": result.pages_fetched,
-                    "items_fetched": result.items_fetched,
-                    "expected_count": result.expected_count,
-                    "count_validation": {
-                        "status": result.count_validation_status,
-                        "reason": result.count_validation_reason,
-                    },
-                    "retries_used": result.retries_used,
-                    "start_skip": result.start_skip,
-                    "next_skip": result.next_skip,
-                    "duration_seconds": round(result.duration_seconds, 3),
-                    "output_file": str(result.output_file),
-                    "checkpoint_file": str(result.checkpoint_file),
-                    "id_validation": {
-                        "status": result.id_validation_status,
-                        "checked_items": result.id_validation_checked_items,
-                        "unique_ids": result.id_validation_unique_ids,
-                        "reason": result.id_validation_reason,
-                    },
-                    "warnings": result.warnings,
-                }
-            )
-        )
-
     run_duration_seconds = time.time() - run_started
-    if not args.quiet and not args.delta_dry_run:
-        _print_run_summary(
+    if args.json and not args.delta_dry_run:
+        _print_json_run_records(results, failures)
+    elif not args.quiet and not args.delta_dry_run:
+        _print_human_run_summary(
+            args=args,
             selected_count=len(selected_specs),
             results=results,
             failures=failures,
             duration_seconds=run_duration_seconds,
+            run_id=run_id,
+            run_output_dir=run_output_dir,
+            non_delta_window_unit=non_delta_window_unit,
         )
 
     exit_code = 130 if run_interrupted else (1 if failures else 0)
@@ -1039,7 +1264,7 @@ def _finalize_run(
                 "mode": (
                     "delta_dry_run"
                     if args.delta_dry_run
-                    else ("delta" if args.delta else "standard")
+                    else ("delta" if args.delta else (non_delta_window_unit or "standard"))
                 ),
                 "duration_seconds": round(run_duration_seconds, 3),
                 "endpoints_total": len(selected_specs),
@@ -1057,9 +1282,11 @@ def _run(args: argparse.Namespace) -> int:
     run_started_dt = _utc_now()
     if args.delta_dry_run:
         args.delta = True
-    if args.months is not None and args.delta:
+    non_delta_window_unit, non_delta_window_amount = _resolve_fetch_window(args)
+    if non_delta_window_unit is not None and args.delta:
         raise ConfigError(
-            "--months is only supported in non-delta mode (without --delta/--delta-dry-run)."
+            f"--{non_delta_window_unit} is only supported in non-delta mode "
+            "(without --delta/--delta-dry-run)."
         )
 
     fetcher_cfg, auth_settings, endpoint_specs = load_fetcher_settings(
@@ -1074,8 +1301,8 @@ def _run(args: argparse.Namespace) -> int:
     if args.delta and not args.delta_dry_run:
         run_id = _delta_run_id(run_started_dt)
         fetcher_cfg.output_dir = fetcher_cfg.output_dir / "runs" / run_id
-    elif args.months is not None:
-        run_id = _window_run_id(run_started_dt, args.months)
+    elif non_delta_window_unit is not None and non_delta_window_amount is not None:
+        run_id = _window_run_id(run_started_dt, non_delta_window_unit, non_delta_window_amount)
         fetcher_cfg.output_dir = fetcher_cfg.output_dir / "runs" / run_id
     else:
         run_id = None
@@ -1098,8 +1325,8 @@ def _run(args: argparse.Namespace) -> int:
     if args.delta and delta_state is not None:
         delta_overlap_minutes, delta_overlap_days = _resolve_delta_overlaps(delta_state)
     non_delta_modified_since = (
-        _utc_iso(_subtract_calendar_months(run_started_dt, args.months))
-        if args.months is not None
+        _window_modified_since(run_started_dt, non_delta_window_unit, non_delta_window_amount)
+        if non_delta_window_unit is not None and non_delta_window_amount is not None
         else None
     )
 
@@ -1121,9 +1348,11 @@ def _run(args: argparse.Namespace) -> int:
                 {
                     "level": "summary",
                     "event": "run_start",
-                    "mode": "delta_dry_run"
-                    if args.delta_dry_run
-                    else ("delta" if args.delta else "standard"),
+                    "mode": (
+                        "delta_dry_run"
+                        if args.delta_dry_run
+                        else ("delta" if args.delta else (non_delta_window_unit or "standard"))
+                    ),
                     "selected_endpoints": [spec.name for spec in selected_specs],
                     "resume": args.resume,
                 }
@@ -1168,7 +1397,11 @@ def _run(args: argparse.Namespace) -> int:
                             "sort": runtime_spec.query_params.get("sort"),
                             "delta_overlap_days": delta_overlap_days if args.delta else None,
                             "delta_overlap_minutes": delta_overlap_minutes if args.delta else None,
-                            "mode": "delta" if args.delta else "standard",
+                            "mode": (
+                                "delta"
+                                if args.delta
+                                else (non_delta_window_unit or "standard")
+                            ),
                         }
                     )
 
@@ -1235,7 +1468,11 @@ def _run(args: argparse.Namespace) -> int:
                                 "endpoint": spec.name,
                                 "delta_floor": delta_floor,
                                 "resume": args.resume,
-                                "mode": "delta" if args.delta else "standard",
+                                "mode": (
+                                    "delta"
+                                    if args.delta
+                                    else (non_delta_window_unit or "standard")
+                                ),
                             }
                         )
                     result = run_endpoint(runtime_spec, auth_ctx, fetcher_cfg, **run_kwargs)
@@ -1277,7 +1514,7 @@ def _run(args: argparse.Namespace) -> int:
                             update_delta_state=should_update_delta_state,
                             result=result,
                         )
-                    elif args.months is not None:
+                    elif non_delta_window_unit is not None:
                         attempt_end_dt = _utc_now()
                         delta_endpoint_records.append(
                             {
@@ -1371,6 +1608,7 @@ def _run(args: argparse.Namespace) -> int:
             delta_endpoint_records=delta_endpoint_records,
             run_output_dir=run_output_dir,
             run_id=run_id,
+            non_delta_window_unit=non_delta_window_unit,
             non_delta_modified_since=non_delta_modified_since,
             log_callback=log_callback,
         )

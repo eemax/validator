@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 import re
 import time
+from collections import deque
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -34,6 +36,7 @@ ApiLogCallback = Callable[[ApiLogEvent], None] | None
 class _Page:
     skip: int
     items: list[dict]
+    duration_seconds: float
 
 
 @dataclass
@@ -148,6 +151,10 @@ def _with_pagination_params(
 def _emit_api_log(api_log_callback: ApiLogCallback, event: ApiLogEvent) -> None:
     if api_log_callback is not None:
         api_log_callback(event)
+
+
+def _monotonic_seconds() -> float:
+    return time.perf_counter()
 
 
 def _format_request_url(url: str, params: RequestParams | None) -> str:
@@ -654,6 +661,7 @@ def _iter_pages(
             limit=spec.limit,
         )
 
+        page_started = _monotonic_seconds()
         payload = _request_json_with_retry(
             auth_ctx,
             method="GET",
@@ -667,7 +675,11 @@ def _iter_pages(
             api_log_callback=api_log_callback,
         )
         items = _extract_items(payload, spec.item_path)
-        page = _Page(skip=skip, items=items)
+        page = _Page(
+            skip=skip,
+            items=items,
+            duration_seconds=_monotonic_seconds() - page_started,
+        )
         yield page
 
         fetched += len(items)
@@ -1034,6 +1046,10 @@ def run_endpoint(
 
     pages_fetched = 0
     next_skip = start_skip
+    expected_pages: int | None = None
+    if expected_count is not None and spec.limit > 0:
+        expected_pages = math.ceil(expected_count / spec.limit)
+    page_durations: deque[float] = deque(maxlen=10)
 
     def _fail_integrity(message: str) -> None:
         _emit_progress(
@@ -1166,6 +1182,13 @@ def run_endpoint(
                             first_invalid_id_detail = invalid_detail
             items_fetched += len(page.items)
             next_skip = page.skip + spec.limit
+            page_durations.append(page.duration_seconds)
+            rolling_avg_seconds = sum(page_durations) / len(page_durations)
+            estimated_remaining_seconds: float | None = None
+            if expected_count is not None and spec.limit > 0:
+                remaining_items = max(expected_count - items_fetched, 0)
+                remaining_pages = math.ceil(remaining_items / spec.limit)
+                estimated_remaining_seconds = remaining_pages * rolling_avg_seconds
             _write_checkpoint(
                 checkpoint_path,
                 spec.name,
@@ -1207,7 +1230,11 @@ def run_endpoint(
                     skip=page.skip,
                     next_skip=next_skip,
                     expected_count=expected_count,
+                    expected_pages=expected_pages,
                     percent_complete=percent_complete,
+                    page_duration_seconds=page.duration_seconds,
+                    rolling_avg_seconds=rolling_avg_seconds,
+                    estimated_remaining_seconds=estimated_remaining_seconds,
                     retries_used=retries_used_ref[0],
                     elapsed_seconds=time.time() - started,
                 ),
