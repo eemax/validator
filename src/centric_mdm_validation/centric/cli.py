@@ -26,6 +26,7 @@ from .models import EndpointSpec, FetchProgressEvent, FetchRunResult
 
 _DELTA_STATE_VERSION = 1
 _DEFAULT_DELTA_STATE_CONFIG_PATH = Path("delta_fetcher.yml")
+_DEFAULT_FETCHER_CONFIG_PATH = Path("config/fetcher.yml")
 _DEFAULT_DELTA_LOG_PATH = Path("data/delta.log")
 _DEFAULT_FETCH_LOG_PATH = Path("fetcher.log")
 _DEFAULT_DELTA_OVERLAP_MINUTES = 60
@@ -356,7 +357,11 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     run_parser = subparsers.add_parser("run", help="Run fetch jobs for one or more endpoints")
-    run_parser.add_argument("--config", required=True, help="Path to JSON/YAML fetcher config")
+    run_parser.add_argument(
+        "--config",
+        default=str(_DEFAULT_FETCHER_CONFIG_PATH),
+        help=f"Path to JSON/YAML fetcher config. Defaults to {_DEFAULT_FETCHER_CONFIG_PATH}.",
+    )
     run_parser.add_argument(
         "--params",
         default=None,
@@ -403,6 +408,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--delta-dry-run",
         action="store_true",
         help="Compute and print delta floors/injected filters without fetching data.",
+    )
+    run_parser.add_argument(
+        "--caffeinate",
+        action="store_true",
+        help="macOS only: prevent idle sleep while fetch is running.",
     )
     run_parser.add_argument(
         "--months",

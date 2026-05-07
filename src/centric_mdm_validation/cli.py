@@ -1,3 +1,8 @@
+import os
+import platform
+import shutil
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from textwrap import dedent
@@ -188,8 +193,8 @@ Run steps manually:
   uv run centric-mdm report --target dpp
 
 Fetch data:
-  uv run centric-mdm fetch --config config/fetcher.yml --endpoint styles
-  uv run centric-mdm fetch --config config/fetcher.yml --delta
+  uv run centric-mdm fetch --endpoint styles
+  uv run centric-mdm fetch --delta
 
 More help:
   uv run centric-mdm --help
@@ -209,22 +214,14 @@ def fetch(ctx: typer.Context) -> None:
     """Run Centric fetch jobs."""
 
     args = list(ctx.args)
-    if not args:
-        _fail_with_guidance(
-            "Fetch needs a config file or help flag.",
-            [
-                "Examples:",
-                "  uv run centric-mdm fetch --config config/fetcher.yml --endpoint styles",
-                "  uv run centric-mdm fetch --config config/fetcher.yml --delta",
-                "",
-                "Show all fetch options:",
-                "  uv run centric-mdm fetch --help",
-            ],
-        )
+    caffeinate = _pop_fetch_caffeinate_flag(args)
     if args in (["--help"], ["-h"]):
         args = ["run", "--help"]
     if not args or args[0] != "run":
         args.insert(0, "run")
+    if caffeinate:
+        _run_caffeinated_fetch(args)
+        return
     raise typer.Exit(fetcher_main(args))
 
 
@@ -629,6 +626,50 @@ def _echo_ingest_progress(event: IngestFileProgress) -> None:
             f"{event.records_read} records, {event.records_upserted} upserts, "
             f"{event.records_deleted} deletes"
         )
+
+
+def _pop_fetch_caffeinate_flag(args: list[str]) -> bool:
+    caffeinate = False
+    remaining = []
+    for arg in args:
+        if arg == "--caffeinate":
+            caffeinate = True
+            continue
+        remaining.append(arg)
+    args[:] = remaining
+    return caffeinate
+
+
+def _run_caffeinated_fetch(args: list[str]) -> None:
+    if os.environ.get("CENTRIC_MDM_CAFFEINATED") == "1":
+        raise typer.Exit(fetcher_main(args))
+    if platform.system() != "Darwin":
+        typer.secho(
+            "Warning: --caffeinate is only supported on macOS; running fetch normally.",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+        raise typer.Exit(fetcher_main(args))
+    caffeinate_bin = shutil.which("caffeinate")
+    if caffeinate_bin is None:
+        typer.secho(
+            "Warning: macOS caffeinate command was not found; running fetch normally.",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+        raise typer.Exit(fetcher_main(args))
+
+    env = {**os.environ, "CENTRIC_MDM_CAFFEINATED": "1"}
+    command = [
+        caffeinate_bin,
+        "-i",
+        sys.executable,
+        "-m",
+        "centric_mdm_validation.cli",
+        "fetch",
+        *args[1:],
+    ]
+    raise typer.Exit(subprocess.call(command, env=env))
 
 
 def _echo_reconstruction_runtime(target: str) -> None:

@@ -239,13 +239,19 @@ the current process, refreshed on `401`, and never written to disk.
 Run the fetcher through the main CLI:
 
 ```bash
-uv run centric-mdm fetch --config config/fetcher.yml --endpoint styles
+uv run centric-mdm fetch --endpoint styles
 ```
 
 Run a fresh delta window with:
 
 ```bash
-uv run centric-mdm fetch --config config/fetcher.yml --delta
+uv run centric-mdm fetch --delta
+```
+
+On macOS, keep the machine from idle sleeping while fetch is running:
+
+```bash
+uv run centric-mdm fetch --delta --caffeinate
 ```
 
 Use `--resume` only to continue an interrupted fetch window from its checkpoint.
@@ -257,7 +263,8 @@ private params in this order:
 2. `CENTRIC_CONFIG_DIR/fetch-params.yml`
 3. `.local/fetch-params.yml`
 
-The only repo runtime config currently kept under `config/` is `config/fetcher.yml`.
+The fetcher uses `config/fetcher.yml` by default. The only repo runtime config currently kept
+under `config/` is `config/fetcher.yml`.
 
 Useful modes inherited from the standalone fetcher:
 

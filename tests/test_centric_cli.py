@@ -50,7 +50,7 @@ def test_months_fetch_writes_to_run_directory(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(cli, "init_auth_context", fake_auth_context)
     monkeypatch.setattr(cli, "run_endpoint", fake_run_endpoint)
 
-    exit_code = cli.main(["run", "--config", "config/fetcher.yml", "--months", "2", "--quiet"])
+    exit_code = cli.main(["run", "--months", "2", "--quiet"])
 
     assert exit_code == 0
     assert len(captured_output_dirs) == 1
@@ -63,3 +63,27 @@ def test_months_fetch_writes_to_run_directory(tmp_path, monkeypatch) -> None:
     assert manifest["modified_since"] is not None
     assert manifest["endpoints"]["styles"]["file"] == "styles.jsonl"
     assert manifest["endpoints"]["styles"]["is_delta"] is False
+
+
+def test_run_uses_default_fetcher_config(monkeypatch) -> None:
+    captured_config_paths = []
+
+    def fake_load_fetcher_settings(config_path, **kwargs):
+        captured_config_paths.append(config_path)
+        return (
+            FetcherConfig(),
+            AuthSettings(),
+            [],
+        )
+
+    @contextmanager
+    def fake_auth_context(*args, **kwargs):
+        yield SimpleNamespace(base_url="https://centric.example.com", timeout=30.0)
+
+    monkeypatch.setattr(cli, "load_fetcher_settings", fake_load_fetcher_settings)
+    monkeypatch.setattr(cli, "init_auth_context", fake_auth_context)
+
+    exit_code = cli.main(["run", "--quiet"])
+
+    assert exit_code == 0
+    assert captured_config_paths == ["config/fetcher.yml"]

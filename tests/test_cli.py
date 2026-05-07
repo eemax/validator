@@ -32,12 +32,64 @@ def test_fetch_help_routes_to_fetcher_options() -> None:
     assert "--delta" in result.output
 
 
-def test_fetch_without_args_prints_guidance() -> None:
+def test_fetch_without_args_uses_default_config(monkeypatch) -> None:
+    captured_args = []
+
+    def fake_fetcher_main(args):
+        captured_args.extend(args)
+        return 0
+
+    monkeypatch.setattr("centric_mdm_validation.cli.fetcher_main", fake_fetcher_main)
+
     result = CliRunner().invoke(app, ["fetch"])
 
-    assert result.exit_code == 2
-    assert "Fetch needs a config file" in result.output
-    assert "centric-mdm fetch --config config/fetcher.yml" in result.output
+    assert result.exit_code == 0
+    assert captured_args == ["run"]
+
+
+def test_fetch_caffeinate_wraps_fetch_on_macos(monkeypatch) -> None:
+    captured = {}
+
+    monkeypatch.setattr("centric_mdm_validation.cli.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("centric_mdm_validation.cli.shutil.which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr("centric_mdm_validation.cli.sys.executable", "/python")
+
+    def fake_call(command, env):
+        captured["command"] = command
+        captured["env"] = env
+        return 0
+
+    monkeypatch.setattr("centric_mdm_validation.cli.subprocess.call", fake_call)
+
+    result = CliRunner().invoke(app, ["fetch", "--delta", "--caffeinate"])
+
+    assert result.exit_code == 0
+    assert captured["command"] == [
+        "/usr/bin/caffeinate",
+        "-i",
+        "/python",
+        "-m",
+        "centric_mdm_validation.cli",
+        "fetch",
+        "--delta",
+    ]
+    assert captured["env"]["CENTRIC_MDM_CAFFEINATED"] == "1"
+
+
+def test_fetch_caffeinate_does_not_recurse(monkeypatch) -> None:
+    captured_args = []
+
+    def fake_fetcher_main(args):
+        captured_args.extend(args)
+        return 0
+
+    monkeypatch.setenv("CENTRIC_MDM_CAFFEINATED", "1")
+    monkeypatch.setattr("centric_mdm_validation.cli.fetcher_main", fake_fetcher_main)
+
+    result = CliRunner().invoke(app, ["fetch", "--caffeinate", "--delta"])
+
+    assert result.exit_code == 0
+    assert captured_args == ["run", "--delta"]
 
 
 def test_ingest_command_prints_file_progress(tmp_path) -> None:
