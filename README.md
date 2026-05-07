@@ -129,7 +129,7 @@ it, for example:
 ```text
 CENTRIC_CONFIG_DIR/
   reconstruction.py
-  reconstructors/
+  projections/
     dpp.py
     md.py
     packaging.py  # later
@@ -184,7 +184,6 @@ uv run centric-mdm validate \
   --output data/results/dpp-readiness-results.json
 uv run centric-mdm report \
   --target dpp \
-  --input data/results/dpp-products.jsonl \
   --output-dir reports/dpp-readiness
 ```
 
@@ -204,7 +203,6 @@ uv run centric-mdm validate \
   --output data/results/md-results.json
 uv run centric-mdm report \
   --target md \
-  --input data/results/md-products.jsonl \
   --output-dir reports/md-readiness
 ```
 

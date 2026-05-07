@@ -71,7 +71,7 @@ That private entrypoint is expected to stay small and route into split private m
 ```text
 CENTRIC_CONFIG_DIR/
   reconstruction.py
-  reconstructors/
+  projections/
     dpp.py
     md.py
     packaging.py  # later

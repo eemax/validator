@@ -157,7 +157,7 @@ def reconstruct_master_products(records_by_endpoint):
     return []
 
 
-def project_reconstructed_products(target, reconstructed_products):
+def reconstruct_target_records(target, records_by_endpoint):
     return []
 """,
         encoding="utf-8",
@@ -170,7 +170,7 @@ def project_reconstructed_products(target, reconstructed_products):
 
     assert runtime.path == module_path
     assert runtime.master_strategy == "private reconstruction hook"
-    assert runtime.projection_strategy == "private project_reconstructed_products hook"
+    assert runtime.projection_strategy == "private reconstruct_target_records hook"
 
 
 def test_inspect_reconstruction_runtime_reports_public_placeholder(tmp_path, monkeypatch) -> None:

@@ -23,7 +23,11 @@ from centric_mdm_validation.centric.store import (
     write_target_reconstruction,
 )
 from centric_mdm_validation.io import read_json_records, write_json
-from centric_mdm_validation.models import CentricProductPayload, ReconstructionCheckPayload
+from centric_mdm_validation.models import (
+    CentricProductPayload,
+    ReconstructionCheckPayload,
+    ValidationRunResult,
+)
 from centric_mdm_validation.reporting import DppReadinessReporter, ReconstructionCheckReporter
 from centric_mdm_validation.validation import (
     DppReadinessValidator,
@@ -125,7 +129,7 @@ MD readiness:
 Run steps manually:
   uv run centric-mdm reconstruct --target dpp --output data/results/dpp-products.jsonl
   uv run centric-mdm validate --target dpp --input data/results/dpp-products.jsonl
-  uv run centric-mdm report --target dpp --input data/results/dpp-products.jsonl
+  uv run centric-mdm report --target dpp
 
 Fetch data:
   uv run centric-mdm fetch --config config/fetcher.yml --endpoint styles
@@ -395,10 +399,10 @@ def report(
 ) -> None:
     """Create reconstruction check or target readiness reports."""
 
-    input_file = input_path or _default_validate_input(target)
+    input_file = input_path or _default_validate_output(target)
     output_path = output_dir or _default_report_output_dir(target)
     _echo_step(f"Report: reading {target} records from {input_file}")
-    run = _validate(input_file, rules, target=target)
+    run = _read_report_input(input_file, rules, target=target)
     _echo_step(f"Report: writing report files to {output_path}")
     _write_report_for_target(target, run, output_path)
     if target == "check" and isinstance(run, dict):
@@ -504,6 +508,30 @@ def _validate(input_path: Path, rules: Path | None, *, target: str):
     return _validate_records(records, rules, target=target)
 
 
+def _read_report_input(input_path: Path, rules: Path | None, *, target: str):
+    if not input_path.is_file():
+        _fail_with_guidance(
+            f"Input file not found: {input_path}",
+            _missing_input_guidance(input_path=input_path, target=target),
+        )
+    records = read_json_records(input_path)
+    if len(records) == 1 and _is_validation_result(records[0]):
+        run = records[0]
+        if target == "dpp" and not has_private_report_hook():
+            return ValidationRunResult.model_validate(run)
+        return run
+    return _validate_records(records, rules, target=target)
+
+
+def _is_validation_result(record: dict) -> bool:
+    return {
+        "results",
+        "total_products",
+        "ready_products",
+        "readiness_percent",
+    }.issubset(record)
+
+
 def _write_reconstruction_for_target(*, db: Path, output: Path, target: str):
     if target == "check":
         run = run_reconstruction_coverage_check(db)
@@ -525,12 +553,6 @@ def _validate_records(records, rules: Path | None, *, target: str):
         raise typer.BadParameter(f"Private validation required for target {target!r}.")
     payloads = [CentricProductPayload.model_validate(record) for record in records]
     return _validate_payloads(payloads, rules)
-
-
-def _coerce_dpp_payload(payload) -> CentricProductPayload:
-    if hasattr(payload, "model_dump"):
-        payload = payload.model_dump(mode="json", exclude_none=True)
-    return CentricProductPayload.model_validate(payload)
 
 
 def _validate_payloads(payloads: list[CentricProductPayload], rules: Path | None):

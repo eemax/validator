@@ -135,14 +135,19 @@ def inspect_reconstruction_runtime(
 
     module = load_private_reconstruction_module(path)
     has_master_hook = callable(getattr(module, "reconstruct_master_products", None))
+    has_target_hook = callable(getattr(module, "reconstruct_target_records", None))
     has_projection_hook = callable(getattr(module, "project_reconstructed_products", None))
     projection_strategy = (
         _default_projection_strategy(target)
         if target == DEFAULT_PROJECTION_TARGET
         else (
-            "private project_reconstructed_products hook"
-            if has_projection_hook
-            else _default_projection_strategy(target)
+            "private reconstruct_target_records hook"
+            if has_target_hook
+            else (
+                "private project_reconstructed_products hook"
+                if has_projection_hook
+                else _default_projection_strategy(target)
+            )
         )
     )
 
@@ -343,9 +348,7 @@ def _project_reconstruction_check(product: ReconstructedProduct) -> dict[str, An
     relationships = _mapping_dict(graph.get("relationships"))
     relationship_ids = _relationship_ids(relationships)
     applicability = {
-        key: value
-        for key, value in relationships.items()
-        if key.endswith("_applicability")
+        key: value for key, value in relationships.items() if key.endswith("_applicability")
     }
     resolved_records = _resolved_record_counts(product.source_refs)
     warnings = [_warning_record(warning) for warning in product.warnings]
@@ -367,9 +370,7 @@ def _project_reconstruction_check(product: ReconstructedProduct) -> dict[str, An
 
 def _relationship_ids(relationships: Mapping[str, Any]) -> dict[str, Any]:
     return {
-        key: value
-        for key, value in relationships.items()
-        if not key.endswith("_applicability")
+        key: value for key, value in relationships.items() if not key.endswith("_applicability")
     }
 
 
@@ -445,8 +446,7 @@ def _coerce_reconstructed_product(
             for source_ref in _mapping_list(product.get("source_refs"))
         ),
         warnings=tuple(
-            _coerce_warning(warning)
-            for warning in _mapping_list(product.get("warnings"))
+            _coerce_warning(warning) for warning in _mapping_list(product.get("warnings"))
         ),
     )
 

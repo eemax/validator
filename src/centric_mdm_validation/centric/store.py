@@ -15,11 +15,7 @@ from typing import Any
 import duckdb
 
 from centric_mdm_validation.centric.reconstruction import (
-    DEFAULT_PROJECTION_TARGET,
     ReconstructedProduct,
-    ReconstructionSourceRef,
-    ReconstructionWarning,
-    project_master_products,
     reconstruct_master_products_from_records,
     reconstruct_target_records,
 )
@@ -227,20 +223,6 @@ def _emit_ingest_progress(
     )
 
 
-def write_projected_products_from_master(
-    db_path: Path,
-    output_path: Path,
-    *,
-    target: str = DEFAULT_PROJECTION_TARGET,
-) -> list[Any]:
-    payloads = project_products_from_master(db_path, target=target)
-    write_jsonl(
-        output_path,
-        (_payload_to_json_record(payload) for payload in payloads),
-    )
-    return payloads
-
-
 def write_target_reconstruction(
     db_path: Path,
     output_path: Path,
@@ -266,24 +248,6 @@ def rebuild_master_reconstruction(
         products_reconstructed=len(products),
         source_refs=sum(len(product.source_refs) for product in products),
         warnings=sum(len(product.warnings) for product in products),
-    )
-
-
-def project_products_from_master(
-    db_path: Path,
-    *,
-    target: str = DEFAULT_PROJECTION_TARGET,
-) -> list[Any]:
-    with duckdb.connect(str(db_path)) as conn:
-        initialize_store(conn)
-        products = load_master_reconstruction(conn)
-        records_by_endpoint = (
-            None if target == DEFAULT_PROJECTION_TARGET else load_current_endpoint_records(conn)
-        )
-    return project_master_products(
-        products,
-        target=target,
-        records_by_endpoint=records_by_endpoint,
     )
 
 
@@ -420,34 +384,6 @@ def write_master_reconstruction(
             """,
             warning_rows,
         )
-
-
-def load_master_reconstruction(
-    conn: duckdb.DuckDBPyConnection,
-) -> list[ReconstructedProduct]:
-    initialize_store(conn)
-    rows = conn.execute(
-        """
-        SELECT product_id, style_id, brand_code, season, product_type_code, graph_json
-        FROM reconstructed_products
-        ORDER BY product_id
-        """
-    ).fetchall()
-    source_refs = _load_reconstruction_source_refs(conn)
-    warnings = _load_reconstruction_warnings(conn)
-    return [
-        ReconstructedProduct(
-            product_id=str(product_id),
-            style_id=style_id,
-            brand_code=brand_code,
-            season=season,
-            product_type_code=product_type_code,
-            graph=json.loads(graph_json),
-            source_refs=tuple(source_refs.get(str(product_id), [])),
-            warnings=tuple(warnings.get(str(product_id), [])),
-        )
-        for product_id, style_id, brand_code, season, product_type_code, graph_json in rows
-    ]
 
 
 def load_current_endpoint_records(
@@ -652,28 +588,6 @@ def _initialize_master_reconstruction_tables(conn: duckdb.DuckDBPyConnection) ->
         FROM reconstructed_products
         """
     )
-
-
-def _load_reconstruction_source_refs(
-    conn: duckdb.DuckDBPyConnection,
-) -> dict[str, list[ReconstructionSourceRef]]:
-    rows = conn.execute(
-        """
-        SELECT product_id, source_endpoint, source_record_id, relation_type
-        FROM reconstruction_source_refs
-        ORDER BY product_id, source_endpoint, source_record_id
-        """
-    ).fetchall()
-    refs: defaultdict[str, list[ReconstructionSourceRef]] = defaultdict(list)
-    for product_id, source_endpoint, source_record_id, relation_type in rows:
-        refs[str(product_id)].append(
-            ReconstructionSourceRef(
-                endpoint=str(source_endpoint),
-                record_id=str(source_record_id),
-                relation_type=relation_type,
-            )
-        )
-    return refs
 
 
 def _copy_reconstruction_source_refs(
@@ -927,30 +841,6 @@ def _is_valid_centric_ref(value: str) -> bool:
 
 def _compact_master_graph(graph: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in graph.items() if key not in _MASTER_RECORD_BUCKETS}
-
-
-def _load_reconstruction_warnings(
-    conn: duckdb.DuckDBPyConnection,
-) -> dict[str, list[ReconstructionWarning]]:
-    rows = conn.execute(
-        """
-        SELECT product_id, severity, code, message, source_endpoint, source_record_id
-        FROM reconstruction_warnings
-        ORDER BY product_id, severity, code
-        """
-    ).fetchall()
-    warnings: defaultdict[str, list[ReconstructionWarning]] = defaultdict(list)
-    for product_id, severity, code, message, source_endpoint, source_record_id in rows:
-        warnings[str(product_id)].append(
-            ReconstructionWarning(
-                severity=str(severity),
-                code=str(code),
-                message=str(message),
-                source_endpoint=source_endpoint,
-                source_record_id=source_record_id,
-            )
-        )
-    return warnings
 
 
 def _applied_hash(conn: duckdb.DuckDBPyConnection, path: Path) -> str | None:

@@ -715,25 +715,6 @@ def get_expected_count(
     return int(result)
 
 
-def iter_endpoint_items(
-    spec: EndpointSpec,
-    auth_ctx: AuthContext,
-    fetcher_cfg: FetcherConfig,
-    start_skip: int = 0,
-) -> Iterator[dict]:
-    retries_used_ref = [0]
-    for page in _iter_pages(
-        spec,
-        auth_ctx,
-        fetcher_cfg,
-        start_skip=start_skip,
-        expected_total=None,
-        retries_used_ref=retries_used_ref,
-        progress_callback=None,
-    ):
-        yield from page.items
-
-
 def run_endpoint(
     spec: EndpointSpec,
     auth_ctx: AuthContext,

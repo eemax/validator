@@ -229,6 +229,50 @@ def report_validation_results(target, validation_result, output_dir):
     ) == "packaging:1"
 
 
+def test_report_accepts_existing_validation_result_json(tmp_path, monkeypatch) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("CENTRIC_CONFIG_DIR", str(config_dir))
+    monkeypatch.chdir(tmp_path)
+    (config_dir / "reconstruction.py").write_text(
+        """
+from pathlib import Path
+
+def validate_projected_products(target, payloads, *, rules=None):
+    raise AssertionError("report should not re-validate result JSON")
+
+def report_validation_results(target, validation_result, output_dir):
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    Path(output_dir, "summary.txt").write_text(
+        f"{target}:{validation_result['total_products']}",
+        encoding="utf-8",
+    )
+""",
+        encoding="utf-8",
+    )
+    result_path = tmp_path / "data" / "results" / "packaging-results.json"
+    result_path.parent.mkdir(parents=True)
+    result_path.write_text(
+        json.dumps(
+            {
+                "rule_set_version": "packaging-rules",
+                "total_products": 7,
+                "ready_products": 5,
+                "readiness_percent": 71.43,
+                "results": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report_result = CliRunner().invoke(app, ["report", "--target", "packaging"])
+
+    assert report_result.exit_code == 0
+    assert (tmp_path / "reports" / "packaging" / "summary.txt").read_text(
+        encoding="utf-8"
+    ) == "packaging:7"
+
+
 def test_pipeline_requires_explicit_target(tmp_path) -> None:
     result = CliRunner().invoke(app, ["pipeline", "--raw-dir", str(tmp_path / "raw")])
 
