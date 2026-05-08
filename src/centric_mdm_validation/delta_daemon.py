@@ -23,13 +23,15 @@ from centric_mdm_validation.centric.config import (
 
 DEFAULT_FETCHER_CONFIG_PATH = Path("config/fetcher.yml")
 DEFAULT_DELTA_STATE_CONFIG_PATH = Path("delta_fetcher.yml")
-DEFAULT_DELTA_DAEMON_LOCK_PATH = Path("data/locks/delta-daemon.lock")
+DEFAULT_DELTA_DAEMON_LOCK_PATH = Path("data/cron/locks/delta-daemon.lock")
 DEFAULT_DELTA_DAEMON_LOG_PATH = Path("data/logs/delta-daemon.log")
 DEFAULT_DELTA_RUNS_LOG_PATH = Path("data/logs/delta-runs.jsonl")
+DEFAULT_DELTA_CYCLE_DIR = Path("data/cron")
 
 SleepFn = Callable[[float], None]
 NowFn = Callable[[], datetime]
 EchoFn = Callable[[str], None]
+PipelineRunner = Callable[..., Any]
 
 
 class DeltaDaemonError(RuntimeError):
@@ -40,6 +42,8 @@ class DeltaDaemonError(RuntimeError):
 class DeltaDaemonOptions:
     schedule: str
     endpoints: list[str]
+    then_pipelines: list[str]
+    pipeline_reports: bool
     config: Path | None
     params: Path | None
     delta_state_file: Path | None
@@ -48,6 +52,7 @@ class DeltaDaemonOptions:
     lock_file: Path
     log_file: Path
     runs_log_file: Path
+    cycle_dir: Path
 
 
 @dataclass(frozen=True)
@@ -65,6 +70,28 @@ class DeltaFetchRun:
     stderr: str
     lock_skipped: bool = False
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class DeltaPipelineRun:
+    target: str
+    status: str
+    started_at: datetime
+    finished_at: datetime
+    duration_seconds: float
+    error: str | None = None
+    summary: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class DeltaDaemonCycle:
+    cycle_id: str
+    status: str
+    started_at: datetime
+    finished_at: datetime
+    duration_seconds: float
+    fetch: DeltaFetchRun
+    pipelines: list[DeltaPipelineRun]
 
 
 @dataclass(frozen=True)
@@ -128,6 +155,7 @@ def run_delta_daemon(
     now: NowFn = local_now,
     sleep: SleepFn = time.sleep,
     echo: EchoFn = print,
+    pipeline_runner: PipelineRunner | None = None,
 ) -> int:
     validate_cron_schedule(options.schedule)
     _write_human_log(options.log_file, "Delta daemon starting")
@@ -139,12 +167,35 @@ def run_delta_daemon(
         _announce_wait(next_run, now=now, echo=echo, log_file=options.log_file)
         _sleep_until(next_run, now=now, sleep=sleep)
 
-        run = run_delta_fetch_once(options, now=now)
+        cycle = run_delta_cycle(options, now=now, pipeline_runner=pipeline_runner)
         runs_completed += 1
-        _write_run_logs(options, run)
-        _print_run_summary(run, echo=echo)
+        _write_cycle_logs(options, cycle)
+        _print_cycle_summary(cycle, echo=echo, cycle_dir=options.cycle_dir)
 
     return 0
+
+
+def run_delta_cycle(
+    options: DeltaDaemonOptions,
+    *,
+    now: NowFn = local_now,
+    pipeline_runner: PipelineRunner | None = None,
+) -> DeltaDaemonCycle:
+    started_at = now()
+    fetch_run = run_delta_fetch_once(options, now=now)
+    pipelines: list[DeltaPipelineRun] = []
+    if fetch_run.status == "OK" and options.then_pipelines:
+        pipelines = _run_then_pipelines(options, now=now, pipeline_runner=pipeline_runner)
+    finished_at = now()
+    return DeltaDaemonCycle(
+        cycle_id=_cycle_id(started_at),
+        status=_cycle_status(fetch_run, pipelines),
+        started_at=started_at,
+        finished_at=finished_at,
+        duration_seconds=(finished_at - started_at).total_seconds(),
+        fetch=fetch_run,
+        pipelines=pipelines,
+    )
 
 
 def run_delta_fetch_once(
@@ -213,6 +264,45 @@ def run_delta_fetch_once(
         records=records,
         stderr=stderr,
     )
+
+
+def _run_then_pipelines(
+    options: DeltaDaemonOptions,
+    *,
+    now: NowFn,
+    pipeline_runner: PipelineRunner | None,
+) -> list[DeltaPipelineRun]:
+    raw_dir = resolve_effective_fetch_targets(options).output_dir
+    runs: list[DeltaPipelineRun] = []
+    for target in options.then_pipelines:
+        started_at = now()
+        summary = None
+        error = None
+        status = "OK"
+        try:
+            if pipeline_runner is None:
+                raise DeltaDaemonError("Pipeline runner is not configured.")
+            summary = pipeline_runner(
+                target,
+                raw_dir=raw_dir,
+                include_report=options.pipeline_reports,
+            )
+        except Exception as exc:
+            status = "FAILED"
+            error = str(exc)
+        finished_at = now()
+        runs.append(
+            DeltaPipelineRun(
+                target=target,
+                status=status,
+                started_at=started_at,
+                finished_at=finished_at,
+                duration_seconds=(finished_at - started_at).total_seconds(),
+                error=error,
+                summary=_pipeline_summary_to_record(summary) if summary is not None else None,
+            )
+        )
+    return runs
 
 
 def build_fetch_args(options: DeltaDaemonOptions) -> list[str]:
@@ -292,6 +382,13 @@ def _print_startup(options: DeltaDaemonOptions, *, now: NowFn, echo: EchoFn) -> 
     echo(f"  lock: {options.lock_file}")
     echo(f"  log: {options.log_file}")
     echo(f"  run history: {options.runs_log_file}")
+    echo(f"  cycle summaries: {options.cycle_dir}")
+    if options.then_pipelines:
+        echo("")
+        echo("After successful fetch:")
+        for target in options.then_pipelines:
+            report_mode = "with reports" if options.pipeline_reports else "without reports"
+            echo(f"  pipeline target {target} ({report_mode})")
     echo("")
 
 
@@ -338,6 +435,17 @@ def _parse_jsonl(text: str) -> list[dict[str, Any]]:
     return records
 
 
+def _write_cycle_logs(options: DeltaDaemonOptions, cycle: DeltaDaemonCycle) -> None:
+    _write_run_logs(options, cycle.fetch)
+    _write_cycle_summary(options, cycle)
+    message = (
+        f"Delta cycle {cycle.status}: id={cycle.cycle_id} "
+        f"duration={format_duration(cycle.duration_seconds)} "
+        f"pipelines={_pipeline_status_text(cycle.pipelines)}"
+    )
+    _write_human_log(options.log_file, message)
+
+
 def _write_run_logs(options: DeltaDaemonOptions, run: DeltaFetchRun) -> None:
     message = (
         f"Delta fetch {run.status}: exit_code={run.exit_code} "
@@ -349,6 +457,25 @@ def _write_run_logs(options: DeltaDaemonOptions, run: DeltaFetchRun) -> None:
         message += f" error={run.error}"
     _write_human_log(options.log_file, message)
     _append_jsonl(options.runs_log_file, _run_to_record(run))
+
+
+def _print_cycle_summary(cycle: DeltaDaemonCycle, *, echo: EchoFn, cycle_dir: Path) -> None:
+    _print_run_summary(cycle.fetch, echo=echo)
+    for pipeline_run in cycle.pipelines:
+        if pipeline_run.status == "OK":
+            echo(
+                f"Pipeline {pipeline_run.target} finished: status=OK "
+                f"duration={format_duration(pipeline_run.duration_seconds)}"
+            )
+            continue
+        echo(
+            f"Pipeline {pipeline_run.target} failed: "
+            f"duration={format_duration(pipeline_run.duration_seconds)} "
+            f"error={pipeline_run.error}"
+        )
+    if cycle.pipelines:
+        summary_path = _cycle_summary_path(cycle, cycle_dir)
+        echo(f"Cycle finished: status={cycle.status} summary={summary_path}")
 
 
 def _print_run_summary(run: DeltaFetchRun, *, echo: EchoFn) -> None:
@@ -363,6 +490,19 @@ def _print_run_summary(run: DeltaFetchRun, *, echo: EchoFn) -> None:
     )
     if run.stderr.strip():
         echo(run.stderr.strip())
+
+
+def _write_cycle_summary(options: DeltaDaemonOptions, cycle: DeltaDaemonCycle) -> None:
+    path = _cycle_summary_path(cycle, options.cycle_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(_cycle_to_record(cycle), handle, indent=2, sort_keys=True)
+        handle.write("\n")
+
+
+def _cycle_summary_path(cycle: DeltaDaemonCycle, cycle_dir: Path | None) -> Path:
+    base = cycle_dir or DEFAULT_DELTA_CYCLE_DIR
+    return base / "delta-daemon" / f"{cycle.cycle_id}.json"
 
 
 def _write_human_log(path: Path, message: str) -> None:
@@ -393,6 +533,69 @@ def _run_to_record(run: DeltaFetchRun) -> dict[str, Any]:
         "error": run.error,
         "records": run.records,
     }
+
+
+def _cycle_to_record(cycle: DeltaDaemonCycle) -> dict[str, Any]:
+    return {
+        "cycle_id": cycle.cycle_id,
+        "status": cycle.status,
+        "started_at": cycle.started_at.isoformat(),
+        "finished_at": cycle.finished_at.isoformat(),
+        "duration_seconds": round(cycle.duration_seconds, 3),
+        "fetch": _run_to_record(cycle.fetch),
+        "pipelines": [_pipeline_run_to_record(run) for run in cycle.pipelines],
+    }
+
+
+def _pipeline_run_to_record(run: DeltaPipelineRun) -> dict[str, Any]:
+    return {
+        "target": run.target,
+        "status": run.status,
+        "started_at": run.started_at.isoformat(),
+        "finished_at": run.finished_at.isoformat(),
+        "duration_seconds": round(run.duration_seconds, 3),
+        "error": run.error,
+        "summary": run.summary,
+    }
+
+
+def _cycle_status(fetch_run: DeltaFetchRun, pipelines: list[DeltaPipelineRun]) -> str:
+    if fetch_run.status != "OK":
+        return fetch_run.status
+    if any(run.status != "OK" for run in pipelines):
+        return "PARTIAL_FAILURE"
+    return "OK"
+
+
+def _cycle_id(started_at: datetime) -> str:
+    return started_at.astimezone().strftime("%Y-%m-%dT%H%M%S%z")
+
+
+def _pipeline_status_text(pipelines: list[DeltaPipelineRun]) -> str:
+    if not pipelines:
+        return "none"
+    return ", ".join(f"{run.target}:{run.status}" for run in pipelines)
+
+
+def _pipeline_summary_to_record(summary: Any) -> dict[str, Any]:
+    fields = (
+        "target",
+        "raw_files_applied",
+        "raw_files_skipped",
+        "records_reconstructed",
+        "total_records",
+        "ready_records",
+        "validation_output",
+        "validation_run_dir",
+        "report_output_dir",
+    )
+    record = {}
+    for field in fields:
+        value = getattr(summary, field, None)
+        if isinstance(value, Path):
+            value = str(value)
+        record[field] = value
+    return record
 
 
 def _safe_int(value: Any) -> int:

@@ -29,6 +29,7 @@ from centric_mdm_validation.centric.store import (
     write_target_reconstruction,
 )
 from centric_mdm_validation.delta_daemon import (
+    DEFAULT_DELTA_CYCLE_DIR,
     DEFAULT_DELTA_DAEMON_LOCK_PATH,
     DEFAULT_DELTA_DAEMON_LOG_PATH,
     DEFAULT_DELTA_RUNS_LOG_PATH,
@@ -115,6 +116,19 @@ class PipelineTarget:
     report_output_dir: Path
 
 
+@dataclass(frozen=True)
+class PipelineRunSummary:
+    target: str
+    raw_files_applied: int
+    raw_files_skipped: int
+    records_reconstructed: int
+    total_records: int
+    ready_records: int
+    validation_output: Path
+    validation_run_dir: Path | None
+    report_output_dir: Path | None
+
+
 PIPELINE_TARGETS = {
     "check": PipelineTarget(
         name="check",
@@ -136,7 +150,7 @@ PIPELINE_TARGETS = {
     ),
 }
 PIPELINE_TARGET_HELP = (
-    "Required target to reconstruct, validate, and report. "
+    "Required target to reconstruct, validate, and optionally report. "
     f"Registered targets: {', '.join(PIPELINE_TARGETS)}."
 )
 REPORT_TEMPLATES = {
@@ -218,6 +232,8 @@ Fetch data:
 
 Run recurring delta fetches:
   uv run centric-mdm delta-daemon --schedule "0 * * * *"
+  uv run centric-mdm delta-daemon --schedule "0 * * * *" \\
+    --then-pipeline dpp --then-pipeline md --no-report
 
 More help:
   uv run centric-mdm --help
@@ -271,6 +287,17 @@ def delta_daemon(
         list[str] | None,
         typer.Option("--endpoint", "-e", help="Endpoint name to fetch. Repeat for multiple."),
     ] = None,
+    then_pipeline: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--then-pipeline",
+            help="Pipeline target to run after a successful delta fetch. Repeat for multiple.",
+        ),
+    ] = None,
+    pipeline_reports: Annotated[
+        bool,
+        typer.Option("--report/--no-report", help="Write reports for post-fetch pipelines."),
+    ] = True,
     config: Annotated[
         Path | None,
         typer.Option("--config", help="Fetcher config path."),
@@ -303,6 +330,10 @@ def delta_daemon(
         Path,
         typer.Option("--runs-log-file", help="JSONL delta daemon run history file."),
     ] = DEFAULT_DELTA_RUNS_LOG_PATH,
+    cycle_dir: Annotated[
+        Path,
+        typer.Option("--cycle-dir", help="Directory for JSON delta daemon cycle summaries."),
+    ] = DEFAULT_DELTA_CYCLE_DIR,
     max_runs: Annotated[
         int | None,
         typer.Option("--max-runs", hidden=True),
@@ -313,6 +344,8 @@ def delta_daemon(
     options = DeltaDaemonOptions(
         schedule=schedule,
         endpoints=endpoint or [],
+        then_pipelines=then_pipeline or [],
+        pipeline_reports=pipeline_reports,
         config=config,
         params=params,
         delta_state_file=delta_state_file,
@@ -321,9 +354,16 @@ def delta_daemon(
         lock_file=lock_file,
         log_file=log_file,
         runs_log_file=runs_log_file,
+        cycle_dir=cycle_dir,
     )
     try:
-        raise typer.Exit(run_delta_daemon(options, max_runs=max_runs))
+        raise typer.Exit(
+            run_delta_daemon(
+                options,
+                max_runs=max_runs,
+                pipeline_runner=_run_delta_daemon_pipeline,
+            )
+        )
     except DeltaDaemonError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         _echo_cron_help(err=True)
@@ -446,6 +486,10 @@ def pipeline(
             help="Report output directory. Defaults to the registered target report directory.",
         ),
     ] = None,
+    include_report: Annotated[
+        bool,
+        typer.Option("--report/--no-report", help="Write reports after validation."),
+    ] = True,
     progress: ProgressOption = None,
 ) -> None:
     """Ingest raw files, reconstruct products, validate them, and optionally write reports."""
@@ -463,13 +507,42 @@ def pipeline(
             ],
         )
 
+    _run_pipeline_once(
+        raw_dir=raw_dir,
+        db=db,
+        reconstruction_output=reconstruction_output,
+        target=target,
+        schema=schema,
+        rules=rules,
+        validation_output=validation_output,
+        report_output_dir=report_output_dir,
+        include_report=include_report,
+        progress=progress,
+        echo_summary=True,
+    )
+
+
+def _run_pipeline_once(
+    *,
+    raw_dir: Path,
+    db: Path,
+    reconstruction_output: Path | None,
+    target: str,
+    schema: Path | None,
+    rules: Path | None,
+    validation_output: Path | None,
+    report_output_dir: Path | None,
+    include_report: bool,
+    progress: bool | None,
+    echo_summary: bool,
+) -> PipelineRunSummary:
     target_config = _pipeline_target_config(target)
     projected_output_path = reconstruction_output or target_config.reconstructed_output
     validation_output_path = validation_output or target_config.validation_output
     archive_validation = validation_output is None
     with ProgressReporter(enabled=progress) as progress_reporter:
         progress_message(f"Pipeline: {target}")
-        weights = _pipeline_weights(target)
+        weights = _pipeline_weights(target, include_report=include_report)
         estimates = _pipeline_estimates(target)
         progress_reporter.start_overall("Overall")
         progress_reporter.begin_overall_stage(
@@ -508,26 +581,41 @@ def pipeline(
                 input_path=projected_output_path,
             )
             progress_reporter.finish_overall_stage()
-            report_path = report_output_dir or target_config.report_output_dir
-            progress_reporter.begin_overall_stage(
-                weights["report"],
-                estimated_seconds=estimates["report"],
-            )
-            progress_section("[4/4] Write reports")
-            _echo_step(f"Pipeline: writing aggregate check report to {report_path}")
-            _write_report_for_target(target, run, report_path, progress=progress_reporter)
-            progress_reporter.finish_overall_stage()
+            report_path = None
+            if include_report:
+                report_path = report_output_dir or target_config.report_output_dir
+                progress_reporter.begin_overall_stage(
+                    weights["report"],
+                    estimated_seconds=estimates["report"],
+                )
+                progress_section("[4/4] Write reports")
+                _echo_step(f"Pipeline: writing aggregate check report to {report_path}")
+                _write_report_for_target(target, run, report_path, progress=progress_reporter)
+                progress_reporter.finish_overall_stage()
             progress_reporter.finish_overall()
             summary = run.get("summary", {})
-            _echo_done(
-                f"Check complete: {ingest_result.applied_files} raw files applied "
-                f"({ingest_result.skipped_files} skipped), "
-                f"{summary.get('declared_refs', 0)} refs checked, "
-                f"{summary.get('coverage_percent', 0.0)}% coverage. "
-                f"Results: {validation_output_path}"
-                + (f". Run: {result_run_dir}" if result_run_dir is not None else "")
+            if echo_summary:
+                report_text = f". Reports: {report_path}" if report_path is not None else ""
+                _echo_done(
+                    f"Check complete: {ingest_result.applied_files} raw files applied "
+                    f"({ingest_result.skipped_files} skipped), "
+                    f"{summary.get('declared_refs', 0)} refs checked, "
+                    f"{summary.get('coverage_percent', 0.0)}% coverage. "
+                    f"Results: {validation_output_path}"
+                    + (f". Run: {result_run_dir}" if result_run_dir is not None else "")
+                    + report_text
+                )
+            return PipelineRunSummary(
+                target=target,
+                raw_files_applied=ingest_result.applied_files,
+                raw_files_skipped=ingest_result.skipped_files,
+                records_reconstructed=0,
+                total_records=int(summary.get("declared_refs", 0) or 0),
+                ready_records=int(summary.get("seen_refs", 0) or 0),
+                validation_output=validation_output_path,
+                validation_run_dir=result_run_dir,
+                report_output_dir=report_path,
             )
-            return
 
         progress_reporter.begin_overall_stage(
             weights["reconstruct"],
@@ -560,11 +648,7 @@ def pipeline(
             progress=progress_reporter,
         )
         progress_reporter.finish_overall_stage()
-        progress_reporter.begin_overall_stage(
-            weights["report"],
-            estimated_seconds=estimates["report"],
-        )
-        progress_section("[4/4] Write reports")
+        progress_section("[4/4] Write outputs")
         _echo_step(f"Pipeline: writing validation results to {validation_output_path}")
         result_run_dir = _write_validation_outputs(
             target=target,
@@ -573,22 +657,65 @@ def pipeline(
             archive=archive_validation,
             input_path=projected_output_path,
         )
-        report_path = report_output_dir or target_config.report_output_dir
-        _echo_step(f"Pipeline: writing reports to {report_path}")
-        _write_report_for_target(target, run, report_path, progress=progress_reporter)
-        progress_reporter.finish_overall_stage()
+        report_path = None
+        if include_report:
+            progress_reporter.begin_overall_stage(
+                weights["report"],
+                estimated_seconds=estimates["report"],
+            )
+            progress_section("[4/4] Write reports")
+            report_path = report_output_dir or target_config.report_output_dir
+            _echo_step(f"Pipeline: writing reports to {report_path}")
+            _write_report_for_target(target, run, report_path, progress=progress_reporter)
+            progress_reporter.finish_overall_stage()
         progress_reporter.finish_overall()
 
         total, ready = _validation_counts(run)
-        run_text = f"Run: {result_run_dir}. " if result_run_dir is not None else ""
-        _echo_done(
-            f"Pipeline complete: {ingest_result.applied_files} raw files applied "
-            f"({ingest_result.skipped_files} skipped), "
-            f"{len(projected_payloads)} products reconstructed, "
-            f"{ready}/{total} ready. Results: {validation_output_path}. "
-            f"{run_text}"
-            f"Reports: {report_path}"
+        if echo_summary:
+            run_text = f"Run: {result_run_dir}. " if result_run_dir is not None else ""
+            report_text = (
+                f"Reports: {report_path}" if report_path is not None else "Reports skipped"
+            )
+            _echo_done(
+                f"Pipeline complete: {ingest_result.applied_files} raw files applied "
+                f"({ingest_result.skipped_files} skipped), "
+                f"{len(projected_payloads)} products reconstructed, "
+                f"{ready}/{total} ready. Results: {validation_output_path}. "
+                f"{run_text}"
+                f"{report_text}"
+            )
+        return PipelineRunSummary(
+            target=target,
+            raw_files_applied=ingest_result.applied_files,
+            raw_files_skipped=ingest_result.skipped_files,
+            records_reconstructed=len(projected_payloads),
+            total_records=total,
+            ready_records=ready,
+            validation_output=validation_output_path,
+            validation_run_dir=result_run_dir,
+            report_output_dir=report_path,
         )
+
+
+def _run_delta_daemon_pipeline(
+    target: str,
+    *,
+    raw_dir: Path,
+    include_report: bool,
+) -> PipelineRunSummary:
+    return _run_pipeline_once(
+        raw_dir=raw_dir,
+        db=DEFAULT_DB_PATH,
+        reconstruction_output=None,
+        target=target,
+        schema=None,
+        rules=None,
+        validation_output=None,
+        report_output_dir=None,
+        include_report=include_report,
+        progress=False,
+        echo_summary=False,
+    )
 
 
 @app.command()
@@ -1017,9 +1144,7 @@ def _validate_report_template(target: str, template: str) -> None:
     if templates is None:
         if template == "default":
             return
-        raise typer.BadParameter(
-            f"Template {template!r} is not registered for target {target!r}."
-        )
+        raise typer.BadParameter(f"Template {template!r} is not registered for target {target!r}.")
     if template not in templates:
         choices = ", ".join(sorted(templates))
         raise typer.BadParameter(
@@ -1174,12 +1299,20 @@ def _pipeline_target_config(target: str) -> PipelineTarget:
     )
 
 
-def _pipeline_weights(target: str) -> dict[str, float]:
+def _pipeline_weights(target: str, *, include_report: bool = True) -> dict[str, float]:
     if target == "dpp":
-        return DPP_PIPELINE_WEIGHTS
-    if target == "check":
-        return CHECK_PIPELINE_WEIGHTS
-    return DEFAULT_PIPELINE_WEIGHTS
+        weights = DPP_PIPELINE_WEIGHTS
+    elif target == "check":
+        weights = CHECK_PIPELINE_WEIGHTS
+    else:
+        weights = DEFAULT_PIPELINE_WEIGHTS
+    if include_report:
+        return weights
+    kept = {key: value for key, value in weights.items() if key != "report"}
+    total = sum(kept.values())
+    if total <= 0:
+        return kept
+    return {key: value / total for key, value in kept.items()}
 
 
 def _pipeline_estimates(target: str) -> dict[str, float]:

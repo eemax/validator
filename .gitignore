@@ -35,12 +35,12 @@ data/checkpoints/*
 data/raw/*
 data/results/*
 data/logs/*
-data/locks/*
+data/cron/*
 reports/*
 
 !data/checkpoints/.gitkeep
 !data/raw/.gitkeep
 !data/results/.gitkeep
 !data/logs/.gitkeep
-!data/locks/.gitkeep
+!data/cron/.gitkeep
 !reports/.gitkeep

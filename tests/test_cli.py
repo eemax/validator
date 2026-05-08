@@ -565,6 +565,58 @@ def report_validation_results(target, validation_result, output_dir):
     ) == "md"
 
 
+def test_pipeline_no_report_skips_report_writes(tmp_path, monkeypatch) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("CENTRIC_CONFIG_DIR", str(config_dir))
+    monkeypatch.chdir(tmp_path)
+    (config_dir / "reconstruction.py").write_text(
+        """
+def reconstruct_target_records(target, records_by_endpoint):
+    return [{"target": target, "style_id": style["id"]} for style in records_by_endpoint["styles"]]
+
+def validate_projected_products(target, payloads, *, rules=None):
+    payloads = list(payloads)
+    return {
+        "rule_set_version": f"{target}-rules",
+        "total_products": len(payloads),
+        "ready_products": len(payloads),
+        "readiness_percent": 100.0,
+        "results": [],
+    }
+
+def report_validation_results(target, validation_result, output_dir):
+    raise AssertionError("report should not run")
+""",
+        encoding="utf-8",
+    )
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    (raw_dir / "styles.jsonl").write_text(
+        json.dumps({"id": "S1", "node_name": "Seed Jacket"}, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "pipeline",
+            "--target",
+            "md",
+            "--raw-dir",
+            str(raw_dir),
+            "--db",
+            str(tmp_path / "centric.duckdb"),
+            "--no-report",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Reports skipped" in result.output
+    assert (tmp_path / "data" / "results" / "latest" / "md-results.json").is_file()
+    assert not (tmp_path / "reports" / "md-readiness").exists()
+
+
 def test_pipeline_report_output_dir_overrides_registered_default(
     tmp_path,
     monkeypatch,

@@ -60,10 +60,12 @@ relationship is modeled, and refresh the aggregate check or private target paylo
 styles, variants, materials, and BOM state.
 
 `centric-mdm delta-daemon` is a foreground local-time cron scheduler for recurring delta fetches.
-It owns scheduling, lock protection, and daemon run logs, while the fetcher continues to own
-delta state, checkpoints, raw run directories, and endpoint integrity checks. It is deliberately
-not a validation server; reconstruction, validation, and reporting remain explicit follow-up
-commands for now.
+It owns scheduling, lock protection, daemon logs, and structured cycle summaries under
+`data/cron`. The fetcher continues to own delta state, checkpoints, raw run directories, and
+endpoint integrity checks. The daemon can trigger existing target pipelines after a successful
+fetch with repeated `--then-pipeline` options, but it does not own reconstruction or validation
+logic. If one post-fetch pipeline fails, the cycle is recorded as a partial failure and later
+pipelines still run.
 
 The detailed reconstruction logic is installation-specific and proprietary. It should not be
 committed to the public repo. The reconstruction loader resolves private logic in this order:

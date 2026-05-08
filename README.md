@@ -95,7 +95,7 @@ uv run centric-mdm reconstruct \
 Use explicit targets for target-specific reconstruction. Current targets are `check`, `dpp`,
 and `md`; `packaging` is expected later.
 
-Or run ingest, reconstruct, validation, and reporting together for an explicit target:
+Or run ingest, reconstruct, validation, and optional reporting together for an explicit target:
 
 ```bash
 uv run centric-mdm pipeline --target dpp
@@ -115,6 +115,13 @@ copy under `data/results/runs/<timestamp>-dpp/`, and `reports/dpp-readiness/`. U
 `--reconstruction-output`, `--validation-output`, or `--report-output-dir` only when you want to
 override those defaults. Explicit `--validation-output` writes only that requested path and skips
 the automatic historical archive.
+
+Use `--no-report` when you only want ingest, reconstruction, validation, latest results, and
+validation run history:
+
+```bash
+uv run centric-mdm pipeline --target dpp --no-report
+```
 
 Endpoint merge behavior lives in `config/endpoint-schema.yml`. Each endpoint can define its
 primary key, modified timestamp fields, inactive/tombstone handling, and full-file semantics.
@@ -302,6 +309,21 @@ waits again. It uses local timezone only. Useful schedules:
 0 3 * * *      daily at 03:00
 ```
 
+Optionally run target pipelines after a successful delta fetch:
+
+```bash
+uv run centric-mdm delta-daemon \
+  --schedule "0 * * * *" \
+  --then-pipeline dpp \
+  --then-pipeline md \
+  --no-report
+```
+
+Post-fetch pipelines run only after the fetch succeeds. Each target is attempted independently:
+if `dpp` fails, `md` still runs, the fetch remains successful, and the cycle is recorded as a
+partial failure. Because ingest is idempotent, the next pipeline run can catch up from the raw
+files already written by the successful fetch.
+
 On macOS, keep the machine from idle sleeping while fetch is running:
 
 ```bash
@@ -348,10 +370,11 @@ Useful modes inherited from the standalone fetcher:
 
 Delta daemon operational files:
 
-- `data/locks/delta-daemon.lock`: prevents overlapping daemon fetches.
+- `data/cron/locks/delta-daemon.lock`: prevents overlapping daemon fetches.
 - `data/logs/delta-daemon.log`: human-readable daemon activity log.
 - `data/logs/delta-runs.jsonl`: JSONL daemon run history.
 - `data/logs/delta.log`: fetcher's delta endpoint/run log.
+- `data/cron/delta-daemon/*.json`: structured fetch-plus-pipeline cycle summaries.
 
 ## Project Boundary
 
