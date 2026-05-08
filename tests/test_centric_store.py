@@ -2,7 +2,11 @@ import json
 
 import duckdb
 
-from centric_mdm_validation.centric.schema import EndpointSchema, load_endpoint_schemas
+from centric_mdm_validation.centric.schema import (
+    DeleteCondition,
+    EndpointSchema,
+    load_endpoint_schemas,
+)
 from centric_mdm_validation.centric.store import (
     ingest_raw_dir,
     load_current_endpoint_records,
@@ -191,6 +195,59 @@ def test_ingest_raw_dir_applies_active_false_as_delete(tmp_path, monkeypatch) ->
 
     assert result.records_deleted == 1
     assert master_result.products_reconstructed == 0
+
+
+def test_ingest_raw_dir_applies_delete_when_any_conditions(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("CENTRIC_CONFIG_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    _write_jsonl(
+        raw_dir / "styles.jsonl",
+        [
+            {
+                "id": "S1",
+                "_modified_at": "2026-04-29T09:00:00Z",
+                "active": True,
+                "node_name": "Seed Jacket",
+            },
+            {
+                "id": "S2",
+                "_modified_at": "2026-04-29T09:00:00Z",
+                "active": True,
+                "node_name": "Seed Shirt",
+            },
+        ],
+    )
+    run_dir = raw_dir / "runs" / "2026-04-30T090000Z"
+    run_dir.mkdir(parents=True)
+    _write_jsonl(
+        run_dir / "styles.delta.jsonl",
+        [
+            {"id": "S1", "_modified_at": "2026-04-30T09:00:00Z", "active": False},
+            {"id": "S2", "_modified_at": "2026-04-30T09:00:00Z", "state": "ABANDONED"},
+        ],
+    )
+    db_path = tmp_path / "centric.duckdb"
+
+    schemas = {
+        "styles": EndpointSchema(
+            name="styles",
+            delete_when_any=(
+                DeleteCondition(field="active", equals=False),
+                DeleteCondition(field="state", equals="ABANDONED"),
+            ),
+        )
+    }
+
+    result = ingest_raw_dir(raw_dir, db_path, schemas=schemas)
+
+    with duckdb.connect(str(db_path)) as conn:
+        remaining = conn.execute("SELECT COUNT(*) FROM current_styles").fetchone()[0]
+
+    assert result.records_deleted == 2
+    assert remaining == 0
 
 
 def test_ingest_raw_dir_rejects_unimplemented_full_snapshot_mode(tmp_path) -> None:

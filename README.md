@@ -40,8 +40,8 @@ uv run centric-mdm examples
 
 Defaults:
 
-- `reconstruct` writes `data/results/reconstruction-check-results.json`
-- `validate` reads that file and writes it back after checking the aggregate result shape
+- `reconstruct` writes `data/results/latest/check-results.json`
+- `validate` reads that file, refreshes it, and archives a copy under `data/results/runs/`
 - `report` reads that file and writes `reports/reconstruction-check/`
 
 The check result contains counts only: endpoint record counts, declared refs, seen refs, missing
@@ -55,7 +55,7 @@ uv run centric-mdm validate \
   --target dpp \
   --input tests/fixtures/projected-products.json \
   --rules tests/fixtures/dpp-readiness.yml \
-  --output data/results/dpp-readiness-results.json
+  --output data/results/latest/dpp-results.json
 ```
 
 ## Ingest And Reconstruct
@@ -89,7 +89,7 @@ Build the aggregate reconstruction check from the current DuckDB state:
 ```bash
 uv run centric-mdm reconstruct \
   --db data/centric.duckdb \
-  --output data/results/reconstruction-check-results.json
+  --output data/results/latest/check-results.json
 ```
 
 Use explicit targets for target-specific reconstruction. Current targets are `check`, `dpp`,
@@ -110,12 +110,30 @@ uv run centric-mdm pipeline --target dpp --progress
 ```
 
 `pipeline` writes the registered default outputs for the target. For `dpp`, that means
-`data/results/dpp-products.jsonl`, `data/results/dpp-readiness-results.json`, and
-`reports/dpp-readiness/`. Use `--reconstruction-output`, `--validation-output`, or
-`--report-output-dir` only when you want to override those defaults.
+`data/results/latest/dpp-products.jsonl`, `data/results/latest/dpp-results.json`, a historical
+copy under `data/results/runs/<timestamp>-dpp/`, and `reports/dpp-readiness/`. Use
+`--reconstruction-output`, `--validation-output`, or `--report-output-dir` only when you want to
+override those defaults. Explicit `--validation-output` writes only that requested path and skips
+the automatic historical archive.
 
 Endpoint merge behavior lives in `config/endpoint-schema.yml`. Each endpoint can define its
 primary key, modified timestamp fields, inactive/tombstone handling, and full-file semantics.
+Delete handling uses `delete_when_any`: if any listed condition matches an incoming raw record,
+that record is removed from the current DuckDB endpoint state while the raw JSONL evidence remains
+unchanged.
+
+```yaml
+endpoints:
+  styles:
+    primary_key: id
+    modified_at_fields: [_modified_at]
+    delete_when_any:
+      - field: active
+        equals: false
+      - field: state
+        equals: ABANDONED
+```
+
 The current full-file mode is `upsert_only`: a non-delta file updates records it contains, but
 does not delete records merely because they are absent from that file. This is intentional for
 window fetches such as `--days 60` or `--months 2`, which are filtered windows rather than
@@ -192,11 +210,10 @@ hooks; `dpp` still has the public readiness validator as a fallback.
 ## Create DPP Reports
 
 ```bash
-uv run centric-mdm reconstruct --target dpp --output data/results/dpp-products.jsonl
+uv run centric-mdm reconstruct --target dpp --output data/results/latest/dpp-products.jsonl
 uv run centric-mdm validate \
   --target dpp \
-  --input data/results/dpp-products.jsonl \
-  --output data/results/dpp-readiness-results.json
+  --input data/results/latest/dpp-products.jsonl
 uv run centric-mdm report \
   --target dpp \
   --output-dir reports/dpp-readiness
@@ -219,11 +236,10 @@ Outputs:
 ## Create MD Reports
 
 ```bash
-uv run centric-mdm reconstruct --target md --output data/results/md-products.jsonl
+uv run centric-mdm reconstruct --target md --output data/results/latest/md-products.jsonl
 uv run centric-mdm validate \
   --target md \
-  --input data/results/md-products.jsonl \
-  --output data/results/md-results.json
+  --input data/results/latest/md-products.jsonl
 uv run centric-mdm report \
   --target md \
   --output-dir reports/md-readiness

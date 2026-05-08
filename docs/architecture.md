@@ -129,7 +129,8 @@ per endpoint. Endpoint merge behavior is configured by `config/endpoint-schema.y
 
 - `centric`: API fetcher, auth, config, checkpoint/resume, delta mode, and fetch integrity.
 - `centric.store`: DuckDB ingest/catch-up and current endpoint state.
-- `centric.schema`: endpoint primary key, modified timestamp, and delete/tombstone rules.
+- `centric.schema`: endpoint primary key, modified timestamp, and `delete_when_any` current-state
+  delete rules.
 - `validation`: DPP rules and target validation hooks.
 - `reporting`: DPP exports and aggregate reconstruction check exports.
 - `models`: normalized payload and result contracts.

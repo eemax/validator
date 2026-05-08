@@ -23,7 +23,7 @@ endpoints:
     path: styles
     skip_param: skip
     limit_param: limit
-    limit: 10
+    limit: 50
     item_path: $
     count_spec:
       api_version: v2
@@ -45,7 +45,7 @@ endpoints:
     path: colorways
     skip_param: skip
     limit_param: limit
-    limit: 10
+    limit: 50
     item_path: $
     count_spec:
       api_version: v2

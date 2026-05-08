@@ -182,7 +182,7 @@ def test_reconstruct_command_defaults_to_check_target(tmp_path, monkeypatch) -> 
     assert ingest_result.exit_code == 0
     assert result.exit_code == 0
     assert "Check: measuring aggregate endpoint coverage" in result.output
-    output_path = tmp_path / "data" / "results" / "reconstruction-check-results.json"
+    output_path = tmp_path / "data" / "results" / "latest" / "check-results.json"
     assert output_path.is_file()
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert payload["summary"]["styles"] == 1
@@ -191,7 +191,7 @@ def test_reconstruct_command_defaults_to_check_target(tmp_path, monkeypatch) -> 
 
 def test_validate_and_report_default_to_reconstruction_check(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
-    check_path = tmp_path / "data" / "results" / "reconstruction-check-results.json"
+    check_path = tmp_path / "data" / "results" / "latest" / "check-results.json"
     check_path.parent.mkdir(parents=True)
     check_path.write_text(
         json.dumps(
@@ -258,7 +258,7 @@ def test_validate_and_report_default_to_reconstruction_check(tmp_path, monkeypat
 
     assert validate_result.exit_code == 0
     assert "reading check records" in validate_result.output
-    assert (tmp_path / "data" / "results" / "reconstruction-check-results.json").is_file()
+    assert (tmp_path / "data" / "results" / "latest" / "check-results.json").is_file()
     assert report_result.exit_code == 0
     assert "reading check records" in report_result.output
     summary_path = tmp_path / "reports" / "reconstruction-check" / "reconstruction-check-summary.md"
@@ -293,7 +293,7 @@ def report_validation_results(target, validation_result, output_dir):
 """,
         encoding="utf-8",
     )
-    input_path = tmp_path / "data" / "results" / "packaging-products.jsonl"
+    input_path = tmp_path / "data" / "results" / "latest" / "packaging-products.jsonl"
     input_path.parent.mkdir(parents=True)
     input_path.write_text(json.dumps({"style_id": "S1"}) + "\n", encoding="utf-8")
 
@@ -302,11 +302,59 @@ def report_validation_results(target, validation_result, output_dir):
 
     assert validate_result.exit_code == 0
     assert "Validated 1 records: 1 ready" in validate_result.output
-    assert (tmp_path / "data" / "results" / "packaging-results.json").is_file()
+    latest_result = tmp_path / "data" / "results" / "latest" / "packaging-results.json"
+    assert latest_result.is_file()
+    run_dirs = list((tmp_path / "data" / "results" / "runs").glob("*-packaging"))
+    assert len(run_dirs) == 1
+    assert (run_dirs[0] / "packaging-results.json").is_file()
+    manifest = json.loads((run_dirs[0] / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["target"] == "packaging"
+    assert manifest["input_path"].endswith("data/results/latest/packaging-products.jsonl")
+    assert manifest["latest_result_path"].endswith("data/results/latest/packaging-results.json")
     assert report_result.exit_code == 0
     assert (tmp_path / "reports" / "packaging" / "summary.txt").read_text(
         encoding="utf-8"
     ) == "packaging:1"
+
+
+def test_validate_explicit_output_skips_result_archive(tmp_path, monkeypatch) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("CENTRIC_CONFIG_DIR", str(config_dir))
+    monkeypatch.chdir(tmp_path)
+    (config_dir / "reconstruction.py").write_text(
+        """
+def validate_projected_products(target, payloads, *, rules=None):
+    payloads = list(payloads)
+    return {
+        "rule_set_version": f"{target}-rules",
+        "total_products": len(payloads),
+        "ready_products": len(payloads),
+        "readiness_percent": 100.0,
+        "results": [],
+    }
+""",
+        encoding="utf-8",
+    )
+    input_path = tmp_path / "data" / "results" / "latest" / "packaging-products.jsonl"
+    input_path.parent.mkdir(parents=True)
+    input_path.write_text(json.dumps({"style_id": "S1"}) + "\n", encoding="utf-8")
+    explicit_output = tmp_path / "custom-results.json"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "validate",
+            "--target",
+            "packaging",
+            "--output",
+            str(explicit_output),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert explicit_output.is_file()
+    assert not (tmp_path / "data" / "results" / "runs").exists()
 
 
 def test_report_accepts_existing_validation_result_json(tmp_path, monkeypatch) -> None:
@@ -330,7 +378,7 @@ def report_validation_results(target, validation_result, output_dir):
 """,
         encoding="utf-8",
     )
-    result_path = tmp_path / "data" / "results" / "packaging-results.json"
+    result_path = tmp_path / "data" / "results" / "latest" / "packaging-results.json"
     result_path.parent.mkdir(parents=True)
     result_path.write_text(
         json.dumps(
@@ -371,7 +419,7 @@ def report_validation_results(target, validation_result, output_dir, *, template
 """,
         encoding="utf-8",
     )
-    result_path = tmp_path / "data" / "results" / "dpp-readiness-results.json"
+    result_path = tmp_path / "data" / "results" / "latest" / "dpp-results.json"
     result_path.parent.mkdir(parents=True)
     result_path.write_text(
         json.dumps(
@@ -450,7 +498,7 @@ def test_pipeline_supports_public_check_target(tmp_path, monkeypatch) -> None:
     assert result.exit_code == 0
     assert "Pipeline: checking aggregate endpoint coverage" in result.output
     assert "Validated" not in result.output
-    assert (tmp_path / "data" / "results" / "reconstruction-check-results.json").is_file()
+    assert (tmp_path / "data" / "results" / "latest" / "check-results.json").is_file()
     assert (tmp_path / "reports" / "reconstruction-check" / "reconstruction-check.xlsx").is_file()
 
 
@@ -504,8 +552,14 @@ def report_validation_results(target, validation_result, output_dir):
 
     assert result.exit_code == 0
     assert "Pipeline: building md records" in result.output
-    assert (tmp_path / "data" / "results" / "md-products.jsonl").is_file()
-    assert (tmp_path / "data" / "results" / "md-results.json").is_file()
+    assert (tmp_path / "data" / "results" / "latest" / "md-products.jsonl").is_file()
+    assert (tmp_path / "data" / "results" / "latest" / "md-results.json").is_file()
+    run_dirs = list((tmp_path / "data" / "results" / "runs").glob("*-md"))
+    assert len(run_dirs) == 1
+    assert (run_dirs[0] / "md-results.json").is_file()
+    manifest = json.loads((run_dirs[0] / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["target"] == "md"
+    assert manifest["total_products"] == 1
     assert (tmp_path / "reports" / "md-readiness" / "summary.txt").read_text(
         encoding="utf-8"
     ) == "md"

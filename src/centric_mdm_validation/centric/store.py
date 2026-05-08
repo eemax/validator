@@ -19,7 +19,7 @@ from centric_mdm_validation.centric.reconstruction import (
     reconstruct_master_products_from_records,
     reconstruct_target_records,
 )
-from centric_mdm_validation.centric.schema import EndpointSchema
+from centric_mdm_validation.centric.schema import DeleteCondition, EndpointSchema
 from centric_mdm_validation.io import write_jsonl
 from centric_mdm_validation.progress import ProgressEvent
 
@@ -1083,10 +1083,19 @@ def _modified_at_ts_sql_expr(schema: EndpointSchema) -> str:
 
 
 def _delete_sql_expr(schema: EndpointSchema) -> str:
-    if schema.delete_field is None:
+    if not schema.delete_when_any:
         return "false"
-    delete_value = _delete_when_text(schema.delete_when)
-    return f"json_extract_string(payload, '{_json_path(schema.delete_field)}') = '{delete_value}'"
+    conditions = [_delete_condition_sql_expr(condition) for condition in schema.delete_when_any]
+    return "(" + " OR ".join(conditions) + ")"
+
+
+def _delete_condition_sql_expr(condition: DeleteCondition) -> str:
+    delete_value = _delete_when_text(condition.equals)
+    return (
+        "coalesce("
+        f"json_extract_string(payload, '{_json_path(condition.field)}') = '{delete_value}', "
+        "false)"
+    )
 
 
 def _delete_when_text(value: Any) -> str:

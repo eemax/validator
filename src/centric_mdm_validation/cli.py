@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from textwrap import dedent
 from typing import Annotated
@@ -96,9 +97,12 @@ ProgressOption = Annotated[
 ]
 RULES_CONFIG_PATH = Path("rules/dpp-readiness.yml")
 DEFAULT_DB_PATH = Path("data/centric.duckdb")
-DEFAULT_RECONSTRUCTION_CHECK_RESULTS_PATH = Path("data/results/reconstruction-check-results.json")
-DEFAULT_DPP_PRODUCTS_PATH = Path("data/results/dpp-products.jsonl")
-DEFAULT_DPP_RESULTS_PATH = Path("data/results/dpp-readiness-results.json")
+DEFAULT_RESULTS_DIR = Path("data/results")
+DEFAULT_LATEST_RESULTS_DIR = DEFAULT_RESULTS_DIR / "latest"
+DEFAULT_RESULT_RUNS_DIR = DEFAULT_RESULTS_DIR / "runs"
+DEFAULT_RECONSTRUCTION_CHECK_RESULTS_PATH = DEFAULT_LATEST_RESULTS_DIR / "check-results.json"
+DEFAULT_DPP_PRODUCTS_PATH = DEFAULT_LATEST_RESULTS_DIR / "dpp-products.jsonl"
+DEFAULT_DPP_RESULTS_PATH = DEFAULT_LATEST_RESULTS_DIR / "dpp-results.json"
 DEFAULT_RECONSTRUCTION_CHECK_REPORT_DIR = Path("reports/reconstruction-check")
 DEFAULT_DPP_REPORT_DIR = Path("reports/dpp-readiness")
 
@@ -126,8 +130,8 @@ PIPELINE_TARGETS = {
     ),
     "md": PipelineTarget(
         name="md",
-        reconstructed_output=Path("data/results/md-products.jsonl"),
-        validation_output=Path("data/results/md-results.json"),
+        reconstructed_output=DEFAULT_LATEST_RESULTS_DIR / "md-products.jsonl",
+        validation_output=DEFAULT_LATEST_RESULTS_DIR / "md-results.json",
         report_output_dir=Path("reports/md-readiness"),
     ),
 }
@@ -201,8 +205,8 @@ Force live progress output:
   uv run centric-mdm pipeline --target dpp --progress
 
 Run steps manually:
-  uv run centric-mdm reconstruct --target dpp --output data/results/dpp-products.jsonl
-  uv run centric-mdm validate --target dpp --input data/results/dpp-products.jsonl
+  uv run centric-mdm reconstruct --target dpp
+  uv run centric-mdm validate --target dpp
   uv run centric-mdm report --target dpp
 
 Fetch data:
@@ -462,6 +466,7 @@ def pipeline(
     target_config = _pipeline_target_config(target)
     projected_output_path = reconstruction_output or target_config.reconstructed_output
     validation_output_path = validation_output or target_config.validation_output
+    archive_validation = validation_output is None
     with ProgressReporter(enabled=progress) as progress_reporter:
         progress_message(f"Pipeline: {target}")
         weights = _pipeline_weights(target)
@@ -495,7 +500,13 @@ def pipeline(
             )
             progress_section("[3/4] Write validation results")
             _echo_step(f"Pipeline: writing check results to {validation_output_path}")
-            _write_validation_result(validation_output_path, run)
+            result_run_dir = _write_validation_outputs(
+                target=target,
+                latest_output_path=validation_output_path,
+                run=run,
+                archive=archive_validation,
+                input_path=projected_output_path,
+            )
             progress_reporter.finish_overall_stage()
             report_path = report_output_dir or target_config.report_output_dir
             progress_reporter.begin_overall_stage(
@@ -514,6 +525,7 @@ def pipeline(
                 f"{summary.get('declared_refs', 0)} refs checked, "
                 f"{summary.get('coverage_percent', 0.0)}% coverage. "
                 f"Results: {validation_output_path}"
+                + (f". Run: {result_run_dir}" if result_run_dir is not None else "")
             )
             return
 
@@ -554,7 +566,13 @@ def pipeline(
         )
         progress_section("[4/4] Write reports")
         _echo_step(f"Pipeline: writing validation results to {validation_output_path}")
-        _write_validation_result(validation_output_path, run)
+        result_run_dir = _write_validation_outputs(
+            target=target,
+            latest_output_path=validation_output_path,
+            run=run,
+            archive=archive_validation,
+            input_path=projected_output_path,
+        )
         report_path = report_output_dir or target_config.report_output_dir
         _echo_step(f"Pipeline: writing reports to {report_path}")
         _write_report_for_target(target, run, report_path, progress=progress_reporter)
@@ -562,11 +580,13 @@ def pipeline(
         progress_reporter.finish_overall()
 
         total, ready = _validation_counts(run)
+        run_text = f"Run: {result_run_dir}. " if result_run_dir is not None else ""
         _echo_done(
             f"Pipeline complete: {ingest_result.applied_files} raw files applied "
             f"({ingest_result.skipped_files} skipped), "
             f"{len(projected_payloads)} products reconstructed, "
             f"{ready}/{total} ready. Results: {validation_output_path}. "
+            f"{run_text}"
             f"Reports: {report_path}"
         )
 
@@ -592,23 +612,34 @@ def validate(
 
     input_file = input_path or _default_validate_input(target)
     output_file = output or _default_validate_output(target)
+    archive_validation = output is None
     with ProgressReporter(enabled=progress) as progress_reporter:
         progress_section(f"Validate {target}")
         _echo_step(f"Validate: reading {target} records from {input_file}")
         run = _validate(input_file, rules, target=target, progress=progress_reporter)
         _echo_step(f"Validate: writing results to {output_file}")
-        _write_validation_result(output_file, run)
+        result_run_dir = _write_validation_outputs(
+            target=target,
+            latest_output_path=output_file,
+            run=run,
+            archive=archive_validation,
+            input_path=input_file,
+        )
     if target == "check" and isinstance(run, dict):
         summary = run.get("summary", {})
         _echo_done(
             f"Checked {summary.get('declared_refs', 0)} refs: "
             f"{summary.get('seen_refs', 0)} seen "
             f"({summary.get('coverage_percent', 0.0)}%). Results: {output_file}"
+            + (f". Run: {result_run_dir}" if result_run_dir is not None else "")
         )
         return
     total, ready = _validation_counts(run)
     readiness = _readiness_percent(run)
-    _echo_done(f"Validated {total} records: {ready} ready ({readiness}%). Results: {output_file}")
+    _echo_done(
+        f"Validated {total} records: {ready} ready ({readiness}%). Results: {output_file}"
+        + (f". Run: {result_run_dir}" if result_run_dir is not None else "")
+    )
 
 
 @app.command()
@@ -960,19 +991,19 @@ def _validate_payloads(payloads: list[CentricProductPayload], rules: Path | None
 def _default_reconstruct_output(target: str) -> Path:
     if target in PIPELINE_TARGETS:
         return PIPELINE_TARGETS[target].reconstructed_output
-    return Path("data/results") / f"{_target_slug(target)}-products.jsonl"
+    return DEFAULT_LATEST_RESULTS_DIR / f"{_target_slug(target)}-products.jsonl"
 
 
 def _default_validate_input(target: str) -> Path:
     if target in PIPELINE_TARGETS:
         return PIPELINE_TARGETS[target].reconstructed_output
-    return Path("data/results") / f"{_target_slug(target)}-products.jsonl"
+    return DEFAULT_LATEST_RESULTS_DIR / f"{_target_slug(target)}-products.jsonl"
 
 
 def _default_validate_output(target: str) -> Path:
     if target in PIPELINE_TARGETS:
         return PIPELINE_TARGETS[target].validation_output
-    return Path("data/results") / f"{_target_slug(target)}-results.json"
+    return DEFAULT_LATEST_RESULTS_DIR / f"{_target_slug(target)}-results.json"
 
 
 def _default_report_output_dir(target: str) -> Path:
@@ -1042,6 +1073,73 @@ def _write_validation_result(output_path: Path, run) -> None:
         write_json(output_path, run.model_dump(mode="json"))
     else:
         write_json(output_path, run)
+
+
+def _write_validation_outputs(
+    *,
+    target: str,
+    latest_output_path: Path,
+    run,
+    archive: bool,
+    input_path: Path | None = None,
+) -> Path | None:
+    _write_validation_result(latest_output_path, run)
+    if not archive:
+        return None
+
+    run_dir = _create_result_run_dir(target)
+    run_result_path = run_dir / f"{_target_slug(target)}-results.json"
+    _write_validation_result(run_result_path, run)
+    _write_result_run_manifest(
+        run_dir,
+        target=target,
+        input_path=input_path,
+        latest_output_path=latest_output_path,
+        run_result_path=run_result_path,
+        run=run,
+    )
+    return run_dir
+
+
+def _create_result_run_dir(target: str) -> Path:
+    base_name = f"{_result_run_timestamp()}-{_target_slug(target)}"
+    for index in range(100):
+        suffix = "" if index == 0 else f"-{index + 1}"
+        run_dir = DEFAULT_RESULT_RUNS_DIR / f"{base_name}{suffix}"
+        try:
+            run_dir.mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            continue
+        return run_dir
+    raise RuntimeError(f"Could not allocate result run directory for target {target!r}.")
+
+
+def _result_run_timestamp() -> str:
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H%M%SZ")
+
+
+def _write_result_run_manifest(
+    run_dir: Path,
+    *,
+    target: str,
+    input_path: Path | None,
+    latest_output_path: Path,
+    run_result_path: Path,
+    run,
+) -> None:
+    total, ready = _validation_counts(run)
+    manifest = {
+        "target": target,
+        "created_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "input_path": str(input_path) if input_path is not None else None,
+        "latest_result_path": str(latest_output_path),
+        "run_result_path": str(run_result_path),
+        "total_products": total,
+        "ready_products": ready,
+        "readiness_percent": _readiness_percent(run),
+        "rule_set_version": _result_value(run, "rule_set_version", default=None),
+    }
+    write_json(run_dir / "manifest.json", manifest)
 
 
 def _validation_counts(run) -> tuple[int, int]:

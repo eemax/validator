@@ -2,84 +2,98 @@ endpoints:
   styles:
     primary_key: id
     modified_at_fields: [_modified_at]
-    delete_field: active
-    delete_when: false
+    delete_when_any:
+      - field: active
+        equals: false
     full_snapshot_mode: upsert_only
   colorways:
     primary_key: id
     modified_at_fields: [_modified_at]
-    delete_field: active
-    delete_when: false
+    delete_when_any:
+      - field: active
+        equals: false
     full_snapshot_mode: upsert_only
   collections:
     primary_key: id
     modified_at_fields: [_modified_at]
-    delete_field: active
-    delete_when: false
+    delete_when_any:
+      - field: active
+        equals: false
     full_snapshot_mode: upsert_only
   category1s:
     primary_key: id
     modified_at_fields: [_modified_at]
-    delete_field: active
-    delete_when: false
+    delete_when_any:
+      - field: active
+        equals: false
     full_snapshot_mode: upsert_only
   category2s:
     primary_key: id
     modified_at_fields: [_modified_at]
-    delete_field: active
-    delete_when: false
+    delete_when_any:
+      - field: active
+        equals: false
     full_snapshot_mode: upsert_only
   sizes:
     primary_key: id
     modified_at_fields: [_modified_at]
-    delete_field: active
-    delete_when: false
+    delete_when_any:
+      - field: active
+        equals: false
     full_snapshot_mode: upsert_only
   seasons:
     primary_key: id
     modified_at_fields: [_modified_at]
-    delete_field: active
-    delete_when: false
+    delete_when_any:
+      - field: active
+        equals: false
     full_snapshot_mode: upsert_only
   materials:
     primary_key: id
     modified_at_fields: [_modified_at]
-    delete_field: active
-    delete_when: false
+    delete_when_any:
+      - field: active
+        equals: false
     full_snapshot_mode: upsert_only
   boms:
     primary_key: id
     modified_at_fields: [_modified_at]
-    delete_field: active
-    delete_when: false
+    delete_when_any:
+      - field: active
+        equals: false
     full_snapshot_mode: upsert_only
   bom_section_definitions:
     primary_key: id
     modified_at_fields: [_modified_at]
-    delete_field: active
-    delete_when: false
+    delete_when_any:
+      - field: active
+        equals: false
     full_snapshot_mode: upsert_only
   bomrows:
     primary_key: id
     modified_at_fields: [_modified_at]
-    delete_field: active
-    delete_when: false
+    delete_when_any:
+      - field: active
+        equals: false
     full_snapshot_mode: upsert_only
   supplierquotes:
     primary_key: id
     modified_at_fields: [_modified_at]
-    delete_field: active
-    delete_when: false
+    delete_when_any:
+      - field: active
+        equals: false
     full_snapshot_mode: upsert_only
   suppliers:
     primary_key: id
     modified_at_fields: [_modified_at]
-    delete_field: active
-    delete_when: false
+    delete_when_any:
+      - field: active
+        equals: false
     full_snapshot_mode: upsert_only
   factories:
     primary_key: id
     modified_at_fields: [_modified_at]
-    delete_field: active
-    delete_when: false
+    delete_when_any:
+      - field: active
+        equals: false
     full_snapshot_mode: upsert_only

@@ -209,8 +209,26 @@ def test_repo_endpoint_schema_includes_style_reference_endpoints() -> None:
         "bom_section_definitions",
     ):
         assert schemas[endpoint].primary_key == "id"
-        assert schemas[endpoint].delete_field == "active"
+        assert len(schemas[endpoint].delete_when_any) == 1
+        assert schemas[endpoint].delete_when_any[0].field == "active"
+        assert schemas[endpoint].delete_when_any[0].equals is False
         assert schemas[endpoint].full_snapshot_mode == "upsert_only"
+
+
+def test_endpoint_schema_rejects_legacy_delete_fields(tmp_path: Path) -> None:
+    schema_path = _write_config(
+        tmp_path / "endpoint-schema.yml",
+        """
+endpoints:
+  styles:
+    primary_key: id
+    delete_field: active
+    delete_when: false
+""",
+    )
+
+    with pytest.raises(ValueError, match="delete_when_any"):
+        load_endpoint_schemas(schema_path)
 
 
 def test_private_config_path_prefers_explicit_then_config_dir(

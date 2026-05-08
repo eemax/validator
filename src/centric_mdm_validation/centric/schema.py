@@ -10,12 +10,17 @@ DEFAULT_ENDPOINT_SCHEMA_PATH = Path("config/endpoint-schema.yml")
 
 
 @dataclass(frozen=True)
+class DeleteCondition:
+    field: str
+    equals: Any
+
+
+@dataclass(frozen=True)
 class EndpointSchema:
     name: str
     primary_key: str = "id"
     modified_at_fields: tuple[str, ...] = ("_modified_at",)
-    delete_field: str | None = "active"
-    delete_when: Any = False
+    delete_when_any: tuple[DeleteCondition, ...] = (DeleteCondition(field="active", equals=False),)
     full_snapshot_mode: str = "upsert_only"
 
 
@@ -61,6 +66,11 @@ def load_endpoint_schemas(path: Path | None = None) -> dict[str, EndpointSchema]
             raise ValueError(
                 f"Endpoint schema for {endpoint_name!r} must be an object: {resolved_path}"
             )
+        if "delete_field" in config or "delete_when" in config:
+            raise ValueError(
+                "Endpoint schema delete_field/delete_when are no longer supported; "
+                "use delete_when_any instead."
+            )
         name = str(endpoint_name)
         default = schemas.get(name, EndpointSchema(name=name))
         schemas[name] = EndpointSchema(
@@ -70,8 +80,9 @@ def load_endpoint_schemas(path: Path | None = None) -> dict[str, EndpointSchema]
                 config.get("modified_at_fields", config.get("modified_at_field")),
                 default=default.modified_at_fields,
             ),
-            delete_field=_optional_string(config.get("delete_field", default.delete_field)),
-            delete_when=config.get("delete_when", default.delete_when),
+            delete_when_any=_delete_condition_tuple(
+                config.get("delete_when_any", default.delete_when_any)
+            ),
             full_snapshot_mode=str(config.get("full_snapshot_mode", default.full_snapshot_mode)),
         )
     return schemas
@@ -87,7 +98,20 @@ def _string_tuple(value: Any, *, default: tuple[str, ...]) -> tuple[str, ...]:
     raise ValueError("Endpoint schema field lists must be strings or arrays of strings.")
 
 
-def _optional_string(value: Any) -> str | None:
+def _delete_condition_tuple(value: Any) -> tuple[DeleteCondition, ...]:
     if value is None:
-        return None
-    return str(value)
+        return ()
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("Endpoint schema delete_when_any must be an array of objects.")
+
+    conditions: list[DeleteCondition] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("Endpoint schema delete_when_any entries must be objects.")
+        field = item.get("field")
+        if not isinstance(field, str) or not field.strip():
+            raise ValueError("Endpoint schema delete_when_any entries require a field.")
+        if "equals" not in item:
+            raise ValueError("Endpoint schema delete_when_any entries require equals.")
+        conditions.append(DeleteCondition(field=field, equals=item["equals"]))
+    return tuple(conditions)
