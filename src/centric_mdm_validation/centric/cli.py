@@ -295,6 +295,14 @@ def _resolve_fetch_window(args: argparse.Namespace) -> tuple[str | None, int | N
     return None, None
 
 
+def _resolve_runtime_fetch_params(args: argparse.Namespace) -> Path | None:
+    if args.no_params and args.params is not None:
+        raise ConfigError("Use either --params or --no-params, not both.")
+    if args.no_params:
+        return None
+    return resolve_fetch_params_path(args.params)
+
+
 def _window_modified_since(value: datetime, unit: str, amount: int) -> str:
     if unit == "days":
         return _utc_iso(value - timedelta(days=amount))
@@ -401,6 +409,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "Optional private fetch params YAML. Defaults to "
             "CENTRIC_CONFIG_DIR/fetch-params.yml or .local/fetch-params.yml when present."
         ),
+    )
+    run_parser.add_argument(
+        "--no-params",
+        action="store_true",
+        help="Do not load auto-discovered private fetch params.",
     )
     run_parser.add_argument(
         "--endpoint",
@@ -1291,7 +1304,7 @@ def _run(args: argparse.Namespace) -> int:
 
     fetcher_cfg, auth_settings, endpoint_specs = load_fetcher_settings(
         args.config,
-        params_path=resolve_fetch_params_path(args.params),
+        params_path=_resolve_runtime_fetch_params(args),
     )
 
     if args.output_dir:

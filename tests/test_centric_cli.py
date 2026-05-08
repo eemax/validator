@@ -120,6 +120,41 @@ def test_days_and_months_are_mutually_exclusive(capsys) -> None:
     assert "Use either --days or --months, not both." in capsys.readouterr().err
 
 
+def test_no_params_disables_auto_fetch_params(monkeypatch) -> None:
+    captured_params_paths = []
+
+    def fake_resolve_fetch_params_path(*args, **kwargs):  # pragma: no cover - should not run
+        raise AssertionError("resolve_fetch_params_path should not be called")
+
+    def fake_load_fetcher_settings(config_path, **kwargs):
+        captured_params_paths.append(kwargs.get("params_path"))
+        return (
+            FetcherConfig(),
+            AuthSettings(),
+            [],
+        )
+
+    @contextmanager
+    def fake_auth_context(*args, **kwargs):
+        yield SimpleNamespace(base_url="https://centric.example.com", timeout=30.0)
+
+    monkeypatch.setattr(cli, "resolve_fetch_params_path", fake_resolve_fetch_params_path)
+    monkeypatch.setattr(cli, "load_fetcher_settings", fake_load_fetcher_settings)
+    monkeypatch.setattr(cli, "init_auth_context", fake_auth_context)
+
+    exit_code = cli.main(["run", "--no-params", "--quiet"])
+
+    assert exit_code == 0
+    assert captured_params_paths == [None]
+
+
+def test_params_and_no_params_are_mutually_exclusive(capsys) -> None:
+    exit_code = cli.main(["run", "--params", "private.yml", "--no-params", "--quiet"])
+
+    assert exit_code == 1
+    assert "Use either --params or --no-params, not both." in capsys.readouterr().err
+
+
 def test_run_uses_default_fetcher_config(monkeypatch) -> None:
     captured_config_paths = []
 

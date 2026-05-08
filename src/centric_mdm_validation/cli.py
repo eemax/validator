@@ -208,6 +208,7 @@ Run steps manually:
 Fetch data:
   uv run centric-mdm fetch --endpoint styles
   uv run centric-mdm fetch --days 60
+  uv run centric-mdm fetch --days 3 --no-params
   uv run centric-mdm fetch --delta
   uv run centric-mdm fetch --delta --json
 

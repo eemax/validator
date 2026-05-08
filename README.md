@@ -301,6 +301,12 @@ private params in this order:
 2. `CENTRIC_CONFIG_DIR/fetch-params.yml`
 3. `.local/fetch-params.yml`
 
+Use `--no-params` to ignore auto-discovered private params for a broad raw catch-up fetch:
+
+```bash
+uv run centric-mdm fetch --days 3 --no-params
+```
+
 The fetcher uses `config/fetcher.yml` by default. The only repo runtime config currently kept
 under `config/` is `config/fetcher.yml`.
 
@@ -313,6 +319,7 @@ Useful modes inherited from the standalone fetcher:
 - `--delta-dry-run` shows injected delta filters without fetching data.
 - `--days 60` fetches records modified in the last 60 days and writes
   `data/raw/runs/<run-id>-days60/<endpoint>.jsonl`.
+- `--no-params` ignores auto-discovered private fetch params for that run.
 - `--months 24` fetches records modified in the last 24 calendar months and writes
   `data/raw/runs/<run-id>-months24/<endpoint>.jsonl`.
 - `--days` and `--months` are mutually exclusive. Prefer `--days` for operational catch-up runs

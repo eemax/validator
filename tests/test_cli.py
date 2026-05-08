@@ -41,6 +41,7 @@ def test_fetch_help_routes_to_fetcher_options() -> None:
     assert "--config" in result.output
     assert "--delta" in result.output
     assert "--days" in result.output
+    assert "--no-params" in result.output
     assert "--json" in result.output
 
 
