@@ -125,7 +125,11 @@ applied_raw_files(file_path, endpoint, source_run_id, is_delta, record_count, co
 The legacy reconstructed product tables still exist for compatibility, but the active CLI path
 now reads current endpoint state directly for the aggregate check and for private target
 reconstructors. This gives us idempotent catch-up without committing too early to physical tables
-per endpoint. Endpoint merge behavior is configured by `config/endpoint-schema.yml`.
+per endpoint. Endpoint merge behavior starts with `config/endpoint-schema.yml` and can be extended
+by `CENTRIC_CONFIG_DIR/endpoint-schema.yml`, `.local/endpoint-schema.yml` when
+`CENTRIC_CONFIG_DIR` is not set, or an explicit `--schema` overlay. Scalar endpoint fields replace
+inherited values; `delete_when_any_add` appends private delete conditions without duplicating the
+public list.
 
 ## Near-Term Modules
 

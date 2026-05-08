@@ -231,6 +231,89 @@ endpoints:
         load_endpoint_schemas(schema_path)
 
 
+def test_endpoint_schema_loads_private_overlay_from_local(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv(CONFIG_DIR_ENV_VAR, raising=False)
+    local_dir = tmp_path / ".local"
+    local_dir.mkdir()
+    _write_config(
+        local_dir / "endpoint-schema.yml",
+        """
+endpoints:
+  supplierquotes:
+    delete_when_any_add:
+      - field: state
+        equals: ABANDONED
+  styles:
+    full_snapshot_mode: replace_endpoint_scope
+""",
+    )
+
+    schemas = load_endpoint_schemas()
+
+    supplierquote_deletes = schemas["supplierquotes"].delete_when_any
+    assert [(rule.field, rule.equals) for rule in supplierquote_deletes] == [
+        ("active", False),
+        ("state", "ABANDONED"),
+    ]
+    assert schemas["styles"].full_snapshot_mode == "replace_endpoint_scope"
+
+
+def test_endpoint_schema_prefers_config_dir_private_overlay(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_dir = tmp_path / "centric-config"
+    config_dir.mkdir()
+    local_dir = tmp_path / ".local"
+    local_dir.mkdir()
+    _write_config(
+        local_dir / "endpoint-schema.yml",
+        """
+endpoints:
+  styles:
+    primary_key: local_id
+""",
+    )
+    _write_config(
+        config_dir / "endpoint-schema.yml",
+        """
+endpoints:
+  styles:
+    primary_key: config_id
+""",
+    )
+    monkeypatch.setenv(CONFIG_DIR_ENV_VAR, str(config_dir))
+
+    schemas = load_endpoint_schemas()
+
+    assert schemas["styles"].primary_key == "config_id"
+
+
+def test_endpoint_schema_explicit_overlay_replaces_delete_conditions(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    schema_path = _write_config(
+        tmp_path / "endpoint-schema.yml",
+        """
+endpoints:
+  styles:
+    delete_when_any:
+      - field: state
+        equals: REMOVED
+""",
+    )
+
+    schemas = load_endpoint_schemas(schema_path)
+
+    assert [(rule.field, rule.equals) for rule in schemas["styles"].delete_when_any] == [
+        ("state", "REMOVED")
+    ]
+
+
 def test_private_config_path_prefers_explicit_then_config_dir(
     tmp_path: Path,
     monkeypatch,

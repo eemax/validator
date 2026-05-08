@@ -6,7 +6,10 @@ from typing import Any
 
 import yaml
 
+from centric_mdm_validation.centric.config import resolve_optional_private_config_path
+
 DEFAULT_ENDPOINT_SCHEMA_PATH = Path("config/endpoint-schema.yml")
+PRIVATE_ENDPOINT_SCHEMA_PATH = Path("endpoint-schema.yml")
 
 
 @dataclass(frozen=True)
@@ -46,10 +49,26 @@ DEFAULT_ENDPOINT_SCHEMAS: dict[str, EndpointSchema] = {
 
 
 def load_endpoint_schemas(path: Path | None = None) -> dict[str, EndpointSchema]:
-    resolved_path = path or DEFAULT_ENDPOINT_SCHEMA_PATH
-    if not resolved_path.is_file():
-        return dict(DEFAULT_ENDPOINT_SCHEMAS)
+    schemas = dict(DEFAULT_ENDPOINT_SCHEMAS)
+    if DEFAULT_ENDPOINT_SCHEMA_PATH.is_file():
+        schemas = _apply_endpoint_schema_file(schemas, DEFAULT_ENDPOINT_SCHEMA_PATH)
 
+    overlay_path = (
+        Path(path)
+        if path is not None
+        else resolve_optional_private_config_path(PRIVATE_ENDPOINT_SCHEMA_PATH)
+    )
+    if overlay_path is None:
+        return schemas
+    if not overlay_path.is_file():
+        raise ValueError(f"Endpoint schema file not found: {overlay_path}")
+    return _apply_endpoint_schema_file(schemas, overlay_path)
+
+
+def _apply_endpoint_schema_file(
+    schemas: dict[str, EndpointSchema],
+    resolved_path: Path,
+) -> dict[str, EndpointSchema]:
     payload = yaml.safe_load(resolved_path.read_text(encoding="utf-8")) or {}
     if not isinstance(payload, dict):
         raise ValueError(f"Endpoint schema root must be an object: {resolved_path}")
@@ -58,7 +77,7 @@ def load_endpoint_schemas(path: Path | None = None) -> dict[str, EndpointSchema]
     if not isinstance(endpoints, dict):
         raise ValueError(f"Endpoint schema 'endpoints' must be an object: {resolved_path}")
 
-    schemas = dict(DEFAULT_ENDPOINT_SCHEMAS)
+    merged = dict(schemas)
     for endpoint_name, config in endpoints.items():
         if config is None:
             config = {}
@@ -72,20 +91,32 @@ def load_endpoint_schemas(path: Path | None = None) -> dict[str, EndpointSchema]
                 "use delete_when_any instead."
             )
         name = str(endpoint_name)
-        default = schemas.get(name, EndpointSchema(name=name))
-        schemas[name] = EndpointSchema(
+        default = merged.get(name, EndpointSchema(name=name))
+        delete_when_any = _merged_delete_conditions(config, default)
+        merged[name] = EndpointSchema(
             name=name,
             primary_key=str(config.get("primary_key", default.primary_key)),
             modified_at_fields=_string_tuple(
                 config.get("modified_at_fields", config.get("modified_at_field")),
                 default=default.modified_at_fields,
             ),
-            delete_when_any=_delete_condition_tuple(
-                config.get("delete_when_any", default.delete_when_any)
-            ),
+            delete_when_any=delete_when_any,
             full_snapshot_mode=str(config.get("full_snapshot_mode", default.full_snapshot_mode)),
         )
-    return schemas
+    return merged
+
+
+def _merged_delete_conditions(
+    config: dict[str, Any],
+    default: EndpointSchema,
+) -> tuple[DeleteCondition, ...]:
+    conditions = (
+        _delete_condition_tuple(config["delete_when_any"])
+        if "delete_when_any" in config
+        else default.delete_when_any
+    )
+    additions = _delete_condition_tuple(config.get("delete_when_any_add"))
+    return conditions + additions
 
 
 def _string_tuple(value: Any, *, default: tuple[str, ...]) -> tuple[str, ...]:

@@ -129,6 +129,17 @@ Delete handling uses `delete_when_any`: if any listed condition matches an incom
 that record is removed from the current DuckDB endpoint state while the raw JSONL evidence remains
 unchanged.
 
+Private endpoint schema additions can live outside the public repo. By default the loader starts
+with the public `config/endpoint-schema.yml`, then overlays one private file if present:
+
+1. `CENTRIC_CONFIG_DIR/endpoint-schema.yml`
+2. `.local/endpoint-schema.yml` when `CENTRIC_CONFIG_DIR` is not set
+
+Passing `--schema path/to/endpoint-schema.yml` uses that file as the explicit overlay on top of
+the public base and skips auto-discovery. Scalar endpoint fields replace the base value.
+`delete_when_any` replaces the delete list, while `delete_when_any_add` appends private delete
+conditions to the inherited list.
+
 ```yaml
 endpoints:
   styles:
@@ -137,6 +148,16 @@ endpoints:
     delete_when_any:
       - field: active
         equals: false
+      - field: state
+        equals: ABANDONED
+```
+
+For a private additive overlay, prefer:
+
+```yaml
+endpoints:
+  styles:
+    delete_when_any_add:
       - field: state
         equals: ABANDONED
 ```
