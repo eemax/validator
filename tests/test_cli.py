@@ -304,20 +304,20 @@ def report_validation_results(target, validation_result, output_dir):
     assert "Validated 1 records: 1 ready" in validate_result.output
     latest_result = tmp_path / "data" / "results" / "latest" / "packaging-results.json"
     assert latest_result.is_file()
-    run_dirs = list((tmp_path / "data" / "results" / "runs").glob("*-packaging"))
-    assert len(run_dirs) == 1
-    assert (run_dirs[0] / "packaging-results.json").is_file()
-    manifest = json.loads((run_dirs[0] / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["target"] == "packaging"
-    assert manifest["input_path"].endswith("data/results/latest/packaging-products.jsonl")
-    assert manifest["latest_result_path"].endswith("data/results/latest/packaging-results.json")
+    assert not (tmp_path / "data" / "results" / "runs").exists()
+    history_result = CliRunner().invoke(app, ["history", "runs", "--target", "packaging"])
+    assert history_result.exit_code == 0
+    assert "packaging" in history_result.output
     assert report_result.exit_code == 0
     assert (tmp_path / "reports" / "packaging" / "summary.txt").read_text(
         encoding="utf-8"
     ) == "packaging:1"
 
 
-def test_validate_explicit_output_skips_result_archive(tmp_path, monkeypatch) -> None:
+def test_validate_explicit_output_writes_history_without_result_archive(
+    tmp_path,
+    monkeypatch,
+) -> None:
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     monkeypatch.setenv("CENTRIC_CONFIG_DIR", str(config_dir))
@@ -554,12 +554,14 @@ def report_validation_results(target, validation_result, output_dir):
     assert "Pipeline: building md records" in result.output
     assert (tmp_path / "data" / "results" / "latest" / "md-products.jsonl").is_file()
     assert (tmp_path / "data" / "results" / "latest" / "md-results.json").is_file()
-    run_dirs = list((tmp_path / "data" / "results" / "runs").glob("*-md"))
-    assert len(run_dirs) == 1
-    assert (run_dirs[0] / "md-results.json").is_file()
-    manifest = json.loads((run_dirs[0] / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["target"] == "md"
-    assert manifest["total_products"] == 1
+    assert not (tmp_path / "data" / "results" / "runs").exists()
+    history_result = CliRunner().invoke(
+        app,
+        ["history", "runs", "--target", "md", "--db", str(tmp_path / "centric.duckdb")],
+    )
+    assert history_result.exit_code == 0
+    assert "md" in history_result.output
+    assert "1/1" in history_result.output
     assert (tmp_path / "reports" / "md-readiness" / "summary.txt").read_text(
         encoding="utf-8"
     ) == "md"

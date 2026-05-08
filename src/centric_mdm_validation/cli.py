@@ -4,7 +4,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from textwrap import dedent
 from typing import Annotated
@@ -55,12 +55,21 @@ from centric_mdm_validation.validation import (
     DppRuleSet,
     ReconstructionCheckValidator,
 )
+from centric_mdm_validation.validation_history import (
+    ValidationHistoryRun,
+    list_validation_changes,
+    list_validation_issue_counts,
+    list_validation_runs,
+    parse_history_since,
+    record_validation_history,
+)
 
 APP_HELP = """
 Centric MDM validation tools.
 
 Workflow:
   raw endpoint files -> DuckDB store -> check/dpp/md records -> validation -> reports
+  validation changes -> DuckDB history events
 
 Targets:
   check  Aggregate endpoint/reference coverage.
@@ -75,6 +84,12 @@ app = typer.Typer(
     no_args_is_help=True,
     context_settings={"help_option_names": ["--help", "-h"]},
 )
+history_app = typer.Typer(
+    help="Inspect compact DuckDB validation history.",
+    no_args_is_help=True,
+    context_settings={"help_option_names": ["--help", "-h"]},
+)
+app.add_typer(history_app, name="history")
 
 RulesOption = Annotated[
     Path | None,
@@ -100,7 +115,6 @@ RULES_CONFIG_PATH = Path("rules/dpp-readiness.yml")
 DEFAULT_DB_PATH = Path("data/centric.duckdb")
 DEFAULT_RESULTS_DIR = Path("data/results")
 DEFAULT_LATEST_RESULTS_DIR = DEFAULT_RESULTS_DIR / "latest"
-DEFAULT_RESULT_RUNS_DIR = DEFAULT_RESULTS_DIR / "runs"
 DEFAULT_RECONSTRUCTION_CHECK_RESULTS_PATH = DEFAULT_LATEST_RESULTS_DIR / "check-results.json"
 DEFAULT_DPP_PRODUCTS_PATH = DEFAULT_LATEST_RESULTS_DIR / "dpp-products.jsonl"
 DEFAULT_DPP_RESULTS_PATH = DEFAULT_LATEST_RESULTS_DIR / "dpp-results.json"
@@ -125,7 +139,7 @@ class PipelineRunSummary:
     total_records: int
     ready_records: int
     validation_output: Path
-    validation_run_dir: Path | None
+    validation_run_id: str | None
     report_output_dir: Path | None
 
 
@@ -223,6 +237,11 @@ Run steps manually:
   uv run centric-mdm validate --target dpp
   uv run centric-mdm report --target dpp
 
+Inspect validation history:
+  uv run centric-mdm history runs --target dpp
+  uv run centric-mdm history changes --target dpp --since 2d
+  uv run centric-mdm history issues --target dpp --since 3m
+
 Fetch data:
   uv run centric-mdm fetch --endpoint styles
   uv run centric-mdm fetch --days 60
@@ -238,6 +257,7 @@ Run recurring delta fetches:
 More help:
   uv run centric-mdm --help
   uv run centric-mdm pipeline --help
+  uv run centric-mdm history --help
   uv run centric-mdm fetch --help
 """
 
@@ -269,6 +289,142 @@ def examples() -> None:
     """Show copy-paste examples for common workflows."""
 
     typer.echo(dedent(EXAMPLES_TEXT).strip())
+
+
+@history_app.command("runs")
+def history_runs(
+    target: Annotated[
+        str | None,
+        typer.Option("--target", "-t", help="Validation target to filter."),
+    ] = None,
+    since: Annotated[
+        str | None,
+        typer.Option(
+            "--since",
+            help="Absolute date/time or relative duration: 10h, 2d, 3m, 1y.",
+        ),
+    ] = None,
+    db: Annotated[
+        Path,
+        typer.Option("--db", help="DuckDB validation history store."),
+    ] = DEFAULT_DB_PATH,
+    limit: Annotated[
+        int,
+        typer.Option("--limit", help="Maximum rows to display."),
+    ] = 20,
+) -> None:
+    """List validation history runs."""
+
+    since_dt = _parse_history_since_or_fail(since)
+    rows = list_validation_runs(db, target=target, since=since_dt, limit=limit)
+    if not rows:
+        _echo_step("History: no validation runs found.")
+        return
+    _print_history_table(
+        ["created_at", "target", "run_id", "ready", "changes", "issue_changes"],
+        [
+            {
+                "created_at": _format_history_datetime(row["created_at"]),
+                "target": row["target"],
+                "run_id": row["run_id"],
+                "ready": f"{row['ready_records']}/{row['total_records']}",
+                "changes": row["product_changes"],
+                "issue_changes": row["issue_changes"],
+            }
+            for row in rows
+        ],
+    )
+
+
+@history_app.command("changes")
+def history_changes(
+    target: Annotated[
+        str | None,
+        typer.Option("--target", "-t", help="Validation target to filter."),
+    ] = None,
+    since: Annotated[
+        str | None,
+        typer.Option(
+            "--since",
+            help="Absolute date/time or relative duration: 10h, 2d, 3m, 1y.",
+        ),
+    ] = None,
+    db: Annotated[
+        Path,
+        typer.Option("--db", help="DuckDB validation history store."),
+    ] = DEFAULT_DB_PATH,
+    limit: Annotated[
+        int,
+        typer.Option("--limit", help="Maximum rows to display."),
+    ] = 50,
+) -> None:
+    """List changed products from validation history."""
+
+    since_dt = _parse_history_since_or_fail(since)
+    rows = list_validation_changes(db, target=target, since=since_dt, limit=limit)
+    if not rows:
+        _echo_step("History: no validation changes found.")
+        return
+    _print_history_table(
+        ["changed_at", "target", "product_id", "change", "status", "issues"],
+        [
+            {
+                "changed_at": _format_history_datetime(row["changed_at"]),
+                "target": row["target"],
+                "product_id": row["product_id"],
+                "change": row["change_type"],
+                "status": f"{row['previous_status'] or '-'} -> {row['current_status'] or '-'}",
+                "issues": (
+                    f"{len(row['previous_issue_codes'])} -> {len(row['current_issue_codes'])}"
+                ),
+            }
+            for row in rows
+        ],
+    )
+
+
+@history_app.command("issues")
+def history_issues(
+    target: Annotated[
+        str | None,
+        typer.Option("--target", "-t", help="Validation target to filter."),
+    ] = None,
+    since: Annotated[
+        str | None,
+        typer.Option(
+            "--since",
+            help="Absolute date/time or relative duration: 10h, 2d, 3m, 1y.",
+        ),
+    ] = None,
+    db: Annotated[
+        Path,
+        typer.Option("--db", help="DuckDB validation history store."),
+    ] = DEFAULT_DB_PATH,
+    limit: Annotated[
+        int,
+        typer.Option("--limit", help="Maximum rows to display."),
+    ] = 50,
+) -> None:
+    """Summarize added/resolved issue codes from validation history."""
+
+    since_dt = _parse_history_since_or_fail(since)
+    rows = list_validation_issue_counts(db, target=target, since=since_dt, limit=limit)
+    if not rows:
+        _echo_step("History: no validation issue changes found.")
+        return
+    _print_history_table(
+        ["target", "issue_code", "change", "severity", "count"],
+        [
+            {
+                "target": row["target"],
+                "issue_code": row["issue_code"],
+                "change": row["change_type"],
+                "severity": row["severity"] or "",
+                "count": row["count"],
+            }
+            for row in rows
+        ],
+    )
 
 
 @app.command("delta-daemon")
@@ -539,7 +695,6 @@ def _run_pipeline_once(
     target_config = _pipeline_target_config(target)
     projected_output_path = reconstruction_output or target_config.reconstructed_output
     validation_output_path = validation_output or target_config.validation_output
-    archive_validation = validation_output is None
     with ProgressReporter(enabled=progress) as progress_reporter:
         progress_message(f"Pipeline: {target}")
         weights = _pipeline_weights(target, include_report=include_report)
@@ -573,11 +728,11 @@ def _run_pipeline_once(
             )
             progress_section("[3/4] Write validation results")
             _echo_step(f"Pipeline: writing check results to {validation_output_path}")
-            result_run_dir = _write_validation_outputs(
+            history_run = _write_validation_outputs(
+                db=db,
                 target=target,
                 latest_output_path=validation_output_path,
                 run=run,
-                archive=archive_validation,
                 input_path=projected_output_path,
             )
             progress_reporter.finish_overall_stage()
@@ -602,7 +757,7 @@ def _run_pipeline_once(
                     f"{summary.get('declared_refs', 0)} refs checked, "
                     f"{summary.get('coverage_percent', 0.0)}% coverage. "
                     f"Results: {validation_output_path}"
-                    + (f". Run: {result_run_dir}" if result_run_dir is not None else "")
+                    + _history_run_text(history_run)
                     + report_text
                 )
             return PipelineRunSummary(
@@ -613,7 +768,7 @@ def _run_pipeline_once(
                 total_records=int(summary.get("declared_refs", 0) or 0),
                 ready_records=int(summary.get("seen_refs", 0) or 0),
                 validation_output=validation_output_path,
-                validation_run_dir=result_run_dir,
+                validation_run_id=history_run.run_id if history_run is not None else None,
                 report_output_dir=report_path,
             )
 
@@ -650,11 +805,11 @@ def _run_pipeline_once(
         progress_reporter.finish_overall_stage()
         progress_section("[4/4] Write outputs")
         _echo_step(f"Pipeline: writing validation results to {validation_output_path}")
-        result_run_dir = _write_validation_outputs(
+        history_run = _write_validation_outputs(
+            db=db,
             target=target,
             latest_output_path=validation_output_path,
             run=run,
-            archive=archive_validation,
             input_path=projected_output_path,
         )
         report_path = None
@@ -672,7 +827,7 @@ def _run_pipeline_once(
 
         total, ready = _validation_counts(run)
         if echo_summary:
-            run_text = f"Run: {result_run_dir}. " if result_run_dir is not None else ""
+            run_text = f"Run: {history_run.run_id}. " if history_run is not None else ""
             report_text = (
                 f"Reports: {report_path}" if report_path is not None else "Reports skipped"
             )
@@ -692,7 +847,7 @@ def _run_pipeline_once(
             total_records=total,
             ready_records=ready,
             validation_output=validation_output_path,
-            validation_run_dir=result_run_dir,
+            validation_run_id=history_run.run_id if history_run is not None else None,
             report_output_dir=report_path,
         )
 
@@ -724,6 +879,10 @@ def validate(
         Path | None,
         typer.Option("--input", "-i", help="Input JSON/JSONL."),
     ] = None,
+    db: Annotated[
+        Path,
+        typer.Option("--db", help="DuckDB reconstruction and validation history store."),
+    ] = DEFAULT_DB_PATH,
     target: Annotated[
         str,
         typer.Option("--target", "-t", help="Validation target."),
@@ -739,17 +898,16 @@ def validate(
 
     input_file = input_path or _default_validate_input(target)
     output_file = output or _default_validate_output(target)
-    archive_validation = output is None
     with ProgressReporter(enabled=progress) as progress_reporter:
         progress_section(f"Validate {target}")
         _echo_step(f"Validate: reading {target} records from {input_file}")
         run = _validate(input_file, rules, target=target, progress=progress_reporter)
         _echo_step(f"Validate: writing results to {output_file}")
-        result_run_dir = _write_validation_outputs(
+        history_run = _write_validation_outputs(
+            db=db,
             target=target,
             latest_output_path=output_file,
             run=run,
-            archive=archive_validation,
             input_path=input_file,
         )
     if target == "check" and isinstance(run, dict):
@@ -758,14 +916,14 @@ def validate(
             f"Checked {summary.get('declared_refs', 0)} refs: "
             f"{summary.get('seen_refs', 0)} seen "
             f"({summary.get('coverage_percent', 0.0)}%). Results: {output_file}"
-            + (f". Run: {result_run_dir}" if result_run_dir is not None else "")
+            + _history_run_text(history_run)
         )
         return
     total, ready = _validation_counts(run)
     readiness = _readiness_percent(run)
     _echo_done(
         f"Validated {total} records: {ready} ready ({readiness}%). Results: {output_file}"
-        + (f". Run: {result_run_dir}" if result_run_dir is not None else "")
+        + _history_run_text(history_run)
     )
 
 
@@ -985,6 +1143,30 @@ def _echo_done(message: str) -> None:
     typer.echo(f"OK {message}")
 
 
+def _parse_history_since_or_fail(value: str | None):
+    try:
+        return parse_history_since(value)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--since") from exc
+
+
+def _format_history_datetime(value) -> str:
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M")
+    return str(value)
+
+
+def _print_history_table(columns: list[str], rows: list[dict[str, object]]) -> None:
+    widths = {
+        column: max(len(column), *(len(str(row.get(column, ""))) for row in rows))
+        for column in columns
+    }
+    typer.echo("  ".join(column.ljust(widths[column]) for column in columns))
+    typer.echo("  ".join("-" * widths[column] for column in columns))
+    for row in rows:
+        typer.echo("  ".join(str(row.get(column, "")).ljust(widths[column]) for column in columns))
+
+
 def _fail_with_guidance(message: str, guidance: list[str]) -> None:
     typer.secho(f"Error: {message}", fg=typer.colors.RED, err=True)
     if guidance:
@@ -1202,69 +1384,24 @@ def _write_validation_result(output_path: Path, run) -> None:
 
 def _write_validation_outputs(
     *,
+    db: Path,
     target: str,
     latest_output_path: Path,
     run,
-    archive: bool,
     input_path: Path | None = None,
-) -> Path | None:
+) -> ValidationHistoryRun:
     _write_validation_result(latest_output_path, run)
-    if not archive:
-        return None
-
-    run_dir = _create_result_run_dir(target)
-    run_result_path = run_dir / f"{_target_slug(target)}-results.json"
-    _write_validation_result(run_result_path, run)
-    _write_result_run_manifest(
-        run_dir,
+    return record_validation_history(
+        db,
         target=target,
-        input_path=input_path,
-        latest_output_path=latest_output_path,
-        run_result_path=run_result_path,
         run=run,
+        input_path=input_path,
+        latest_result_path=latest_output_path,
     )
-    return run_dir
 
 
-def _create_result_run_dir(target: str) -> Path:
-    base_name = f"{_result_run_timestamp()}-{_target_slug(target)}"
-    for index in range(100):
-        suffix = "" if index == 0 else f"-{index + 1}"
-        run_dir = DEFAULT_RESULT_RUNS_DIR / f"{base_name}{suffix}"
-        try:
-            run_dir.mkdir(parents=True, exist_ok=False)
-        except FileExistsError:
-            continue
-        return run_dir
-    raise RuntimeError(f"Could not allocate result run directory for target {target!r}.")
-
-
-def _result_run_timestamp() -> str:
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H%M%SZ")
-
-
-def _write_result_run_manifest(
-    run_dir: Path,
-    *,
-    target: str,
-    input_path: Path | None,
-    latest_output_path: Path,
-    run_result_path: Path,
-    run,
-) -> None:
-    total, ready = _validation_counts(run)
-    manifest = {
-        "target": target,
-        "created_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-        "input_path": str(input_path) if input_path is not None else None,
-        "latest_result_path": str(latest_output_path),
-        "run_result_path": str(run_result_path),
-        "total_products": total,
-        "ready_products": ready,
-        "readiness_percent": _readiness_percent(run),
-        "rule_set_version": _result_value(run, "rule_set_version", default=None),
-    }
-    write_json(run_dir / "manifest.json", manifest)
+def _history_run_text(history_run: ValidationHistoryRun | None) -> str:
+    return f". Run: {history_run.run_id}" if history_run is not None else ""
 
 
 def _validation_counts(run) -> tuple[int, int]:

@@ -41,7 +41,7 @@ uv run centric-mdm examples
 Defaults:
 
 - `reconstruct` writes `data/results/latest/check-results.json`
-- `validate` reads that file, refreshes it, and archives a copy under `data/results/runs/`
+- `validate` reads that file, refreshes latest results, and records compact DuckDB history events
 - `report` reads that file and writes `reports/reconstruction-check/`
 
 The check result contains counts only: endpoint record counts, declared refs, seen refs, missing
@@ -110,11 +110,10 @@ uv run centric-mdm pipeline --target dpp --progress
 ```
 
 `pipeline` writes the registered default outputs for the target. For `dpp`, that means
-`data/results/latest/dpp-products.jsonl`, `data/results/latest/dpp-results.json`, a historical
-copy under `data/results/runs/<timestamp>-dpp/`, and `reports/dpp-readiness/`. Use
+`data/results/latest/dpp-products.jsonl`, `data/results/latest/dpp-results.json`,
+DuckDB validation history rows, and `reports/dpp-readiness/`. Use
 `--reconstruction-output`, `--validation-output`, or `--report-output-dir` only when you want to
-override those defaults. Explicit `--validation-output` writes only that requested path and skips
-the automatic historical archive.
+override those defaults.
 
 Use `--no-report` when you only want ingest, reconstruction, validation, latest results, and
 validation run history:
@@ -122,6 +121,22 @@ validation run history:
 ```bash
 uv run centric-mdm pipeline --target dpp --no-report
 ```
+
+Validation history is stored in DuckDB as compact append-only change events, not duplicated full
+result JSON. The full latest result remains in `data/results/latest/` for reporting, while raw
+fetch runs remain the source of truth for full historical reconstruction.
+
+```bash
+uv run centric-mdm history runs --target dpp
+uv run centric-mdm history changes --target dpp --since 2d
+uv run centric-mdm history issues --target dpp --since 3m
+```
+
+`--since` accepts absolute dates/times such as `2026-05-08` or `2026-05-08T14:30`, and relative
+durations `10h`, `2d`, `3m`, or `1y`. The `m` unit means months, not minutes.
+
+See [docs/validation-history.md](docs/validation-history.md) for DuckDB table semantics and
+changelog query examples.
 
 Endpoint merge behavior lives in `config/endpoint-schema.yml`. Each endpoint can define its
 primary key, modified timestamp fields, inactive/tombstone handling, and full-file semantics.

@@ -586,7 +586,7 @@ def _pipeline_summary_to_record(summary: Any) -> dict[str, Any]:
         "total_records",
         "ready_records",
         "validation_output",
-        "validation_run_dir",
+        "validation_run_id",
         "report_output_dir",
     )
     record = {}

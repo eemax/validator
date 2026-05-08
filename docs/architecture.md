@@ -131,6 +131,13 @@ by `CENTRIC_CONFIG_DIR/endpoint-schema.yml`, `.local/endpoint-schema.yml` when
 inherited values; `delete_when_any_add` appends private delete conditions without duplicating the
 public list.
 
+Validation history is DuckDB-native. The CLI writes full validation outputs only to
+`data/results/latest/`; it does not archive large historical result JSON files. Each validation
+run appends compact rows to `validation_runs`, `validation_change_events`, and
+`validation_issue_change_events`, then replaces `validation_result_index_current` for that target.
+Historical truth is reconstructed from immutable raw files when needed. The table contract and
+query examples are documented in `docs/validation-history.md`.
+
 ## Near-Term Modules
 
 - `centric`: API fetcher, auth, config, checkpoint/resume, delta mode, and fetch integrity.
@@ -156,5 +163,4 @@ public list.
 3. Add affected-style tracking for incremental reconstruction.
 4. Add the private packaging target when its contract is ready.
 5. Add richer project-specific endpoint examples once the exact Centric payloads are finalized.
-6. Add DuckDB-backed report queries once result history spans multiple runs.
-7. Add trend reports by season, brand, product type, and rule-set version.
+6. Add trend reports by season, brand, product type, and rule-set version.
