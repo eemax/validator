@@ -19,6 +19,7 @@ target-specific validation payloads, runs governed rules, and creates readiness 
   count preflight, ID integrity checks, and structured logs
 - DuckDB-backed ingest/reconstruction path for applying full and delta raw endpoint files
 - Default reconstruction check reporting for aggregate endpoint/reference coverage
+- DuckDB endpoint changelog for selected semantic endpoint field changes
 
 ## Install
 
@@ -137,6 +138,20 @@ durations `10h`, `2d`, `3m`, or `1y`. The `m` unit means months, not minutes.
 
 See [docs/validation-history.md](docs/validation-history.md) for DuckDB table semantics and
 changelog query examples.
+
+Endpoint semantic changes can also be tracked without archiving duplicate full payloads. The
+changelog reads current DuckDB endpoint state, keeps only fields selected in a private YAML config,
+and writes compact before/after events:
+
+```bash
+uv run centric-mdm changelog update
+uv run centric-mdm changelog summary --since 2d
+uv run centric-mdm changelog changes --endpoint styles --since 10h
+```
+
+The changelog config resolves from `CENTRIC_CONFIG_DIR/changelog.yml` or `.local/changelog.yml`
+by default. See [docs/changelog.md](docs/changelog.md) for the config contract and DuckDB table
+semantics.
 
 Endpoint merge behavior lives in `config/endpoint-schema.yml`. Each endpoint can define its
 primary key, modified timestamp fields, inactive/tombstone handling, and full-file semantics.

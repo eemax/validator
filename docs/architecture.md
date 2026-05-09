@@ -138,12 +138,19 @@ run appends compact rows to `validation_runs`, `validation_change_events`, and
 Historical truth is reconstructed from immutable raw files when needed. The table contract and
 query examples are documented in `docs/validation-history.md`.
 
+Endpoint changelog is also DuckDB-native. It is separate from validation history and tracks
+selected semantic fields from current endpoint state using `CENTRIC_CONFIG_DIR/changelog.yml` or
+`.local/changelog.yml`. Each run updates `endpoint_changelog_index_current` and appends
+`endpoint_change_events` with `previous_payload_json` and `current_payload_json` for compact
+before/after inspection. The config and table contract are documented in `docs/changelog.md`.
+
 ## Near-Term Modules
 
 - `centric`: API fetcher, auth, config, checkpoint/resume, delta mode, and fetch integrity.
 - `centric.store`: DuckDB ingest/catch-up and current endpoint state.
 - `centric.schema`: endpoint primary key, modified timestamp, and `delete_when_any` current-state
   delete rules.
+- `endpoint_changelog`: selected endpoint field tracking and append-only semantic change events.
 - `validation`: DPP rules and target validation hooks.
 - `reporting`: DPP exports and aggregate reconstruction check exports.
 - `models`: normalized payload and result contracts.

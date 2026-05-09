@@ -37,6 +37,13 @@ from centric_mdm_validation.delta_daemon import (
     DeltaDaemonOptions,
     run_delta_daemon,
 )
+from centric_mdm_validation.endpoint_changelog import (
+    list_endpoint_change_summary,
+    list_endpoint_changelog_runs,
+    list_endpoint_changes,
+    load_endpoint_changelog_config,
+    record_endpoint_changelog,
+)
 from centric_mdm_validation.io import read_json_records, write_json
 from centric_mdm_validation.models import (
     CentricProductPayload,
@@ -70,6 +77,7 @@ Centric MDM validation tools.
 Workflow:
   raw endpoint files -> DuckDB store -> check/dpp/md records -> validation -> reports
   validation changes -> DuckDB history events
+  selected endpoint fields -> DuckDB semantic changelog events
 
 Targets:
   check  Aggregate endpoint/reference coverage.
@@ -89,7 +97,13 @@ history_app = typer.Typer(
     no_args_is_help=True,
     context_settings={"help_option_names": ["--help", "-h"]},
 )
+changelog_app = typer.Typer(
+    help="Track semantic endpoint payload changes from selected current-state fields.",
+    no_args_is_help=True,
+    context_settings={"help_option_names": ["--help", "-h"]},
+)
 app.add_typer(history_app, name="history")
+app.add_typer(changelog_app, name="changelog")
 
 RulesOption = Annotated[
     Path | None,
@@ -242,6 +256,11 @@ Inspect validation history:
   uv run centric-mdm history changes --target dpp --since 2d
   uv run centric-mdm history issues --target dpp --since 3m
 
+Track endpoint semantic changes:
+  uv run centric-mdm changelog update
+  uv run centric-mdm changelog summary --since 2d
+  uv run centric-mdm changelog changes --endpoint styles --since 10h
+
 Fetch data:
   uv run centric-mdm fetch --endpoint styles
   uv run centric-mdm fetch --days 60
@@ -258,6 +277,7 @@ More help:
   uv run centric-mdm --help
   uv run centric-mdm pipeline --help
   uv run centric-mdm history --help
+  uv run centric-mdm changelog --help
   uv run centric-mdm fetch --help
 """
 
@@ -421,6 +441,160 @@ def history_issues(
                 "change": row["change_type"],
                 "severity": row["severity"] or "",
                 "count": row["count"],
+            }
+            for row in rows
+        ],
+    )
+
+
+@changelog_app.command("update")
+def changelog_update(
+    db: Annotated[
+        Path,
+        typer.Option("--db", help="DuckDB reconstruction store."),
+    ] = DEFAULT_DB_PATH,
+    config: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            help=(
+                "Endpoint changelog field-selection YAML. Defaults to "
+                "CENTRIC_CONFIG_DIR/changelog.yml or .local/changelog.yml."
+            ),
+        ),
+    ] = None,
+) -> None:
+    """Record semantic endpoint changes from configured current-state fields."""
+
+    try:
+        changelog_config = load_endpoint_changelog_config(config)
+        changelog_run = record_endpoint_changelog(db, config=changelog_config)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--config") from exc
+    _echo_done(
+        f"Endpoint changelog updated: {changelog_run.record_count} records tracked across "
+        f"{changelog_run.endpoint_count} endpoints, {changelog_run.event_count} events. "
+        f"Run: {changelog_run.run_id}"
+    )
+
+
+@changelog_app.command("runs")
+def changelog_runs(
+    since: Annotated[
+        str | None,
+        typer.Option(
+            "--since",
+            help="Absolute date/time or relative duration: 10h, 2d, 3m, 1y.",
+        ),
+    ] = None,
+    db: Annotated[
+        Path,
+        typer.Option("--db", help="DuckDB endpoint changelog store."),
+    ] = DEFAULT_DB_PATH,
+    limit: Annotated[
+        int,
+        typer.Option("--limit", help="Maximum rows to display."),
+    ] = 20,
+) -> None:
+    """List endpoint changelog runs."""
+
+    since_dt = _parse_history_since_or_fail(since)
+    rows = list_endpoint_changelog_runs(db, since=since_dt, limit=limit)
+    if not rows:
+        _echo_step("Changelog: no endpoint changelog runs found.")
+        return
+    _print_history_table(
+        ["created_at", "run_id", "endpoints", "records", "events", "config"],
+        [
+            {
+                "created_at": _format_history_datetime(row["created_at"]),
+                "run_id": row["run_id"],
+                "endpoints": row["endpoint_count"],
+                "records": row["record_count"],
+                "events": row["event_count"],
+                "config": row["config_path"],
+            }
+            for row in rows
+        ],
+    )
+
+
+@changelog_app.command("summary")
+def changelog_summary(
+    since: Annotated[
+        str | None,
+        typer.Option(
+            "--since",
+            help="Absolute date/time or relative duration: 10h, 2d, 3m, 1y.",
+        ),
+    ] = None,
+    db: Annotated[
+        Path,
+        typer.Option("--db", help="DuckDB endpoint changelog store."),
+    ] = DEFAULT_DB_PATH,
+    limit: Annotated[
+        int,
+        typer.Option("--limit", help="Maximum rows to display."),
+    ] = 100,
+) -> None:
+    """Summarize endpoint changes by endpoint and change type."""
+
+    since_dt = _parse_history_since_or_fail(since)
+    rows = list_endpoint_change_summary(db, since=since_dt, limit=limit)
+    if not rows:
+        _echo_step("Changelog: no endpoint changes found.")
+        return
+    _print_history_table(
+        ["endpoint", "change", "count"],
+        [
+            {
+                "endpoint": row["endpoint"],
+                "change": row["change_type"],
+                "count": row["count"],
+            }
+            for row in rows
+        ],
+    )
+
+
+@changelog_app.command("changes")
+def changelog_changes(
+    endpoint: Annotated[
+        str | None,
+        typer.Option("--endpoint", "-e", help="Endpoint to filter, for example styles."),
+    ] = None,
+    since: Annotated[
+        str | None,
+        typer.Option(
+            "--since",
+            help="Absolute date/time or relative duration: 10h, 2d, 3m, 1y.",
+        ),
+    ] = None,
+    db: Annotated[
+        Path,
+        typer.Option("--db", help="DuckDB endpoint changelog store."),
+    ] = DEFAULT_DB_PATH,
+    limit: Annotated[
+        int,
+        typer.Option("--limit", help="Maximum rows to display."),
+    ] = 50,
+) -> None:
+    """List changed endpoint records."""
+
+    since_dt = _parse_history_since_or_fail(since)
+    rows = list_endpoint_changes(db, endpoint=endpoint, since=since_dt, limit=limit)
+    if not rows:
+        _echo_step("Changelog: no endpoint changes found.")
+        return
+    _print_history_table(
+        ["changed_at", "endpoint", "record_id", "change", "fields"],
+        [
+            {
+                "changed_at": _format_history_datetime(row["changed_at"]),
+                "endpoint": row["endpoint"],
+                "record_id": row["record_id"],
+                "change": row["change_type"],
+                "fields": ", ".join(row["changed_fields"]),
             }
             for row in rows
         ],
