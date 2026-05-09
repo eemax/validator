@@ -125,7 +125,9 @@ uv run centric-mdm pipeline --target dpp --no-report
 
 Validation history is stored in DuckDB as compact append-only change events, not duplicated full
 result JSON. The full latest result remains in `data/results/latest/` for reporting, while raw
-fetch runs remain the source of truth for full historical reconstruction.
+fetch runs remain the source of truth for full historical reconstruction. The current validation
+index also keeps nullable dashboard columns such as display name, brand, season, score, and issue
+severity counts for fast latest-state filtering.
 
 ```bash
 uv run centric-mdm history runs --target dpp

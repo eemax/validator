@@ -41,11 +41,26 @@ Important columns:
 - `product_id`
 - `ready`
 - `status`
+- `display_name`: dashboard/display label when the validator result exposes one.
+- `brand`: dashboard brand/grouping value when available.
+- `season`: dashboard season/grouping value when available.
+- `season_year`: parsed two-digit season year when available, for filters such as 27+.
+- `group_key`: target-provided grouping key, or `brand|season` when those values exist.
+- `score`: numeric validation score when available.
+- `issue_count`
+- `failure_count`
+- `hard_warning_count`
+- `soft_warning_count`
+- `updated_source_at`: latest source-data timestamp when the validation result exposes one.
 - `issue_hash`
 - `issue_codes_json`
 - `issue_severities_json`
 - `updated_at`
 - `run_id`
+
+The dashboard columns are nullable and intentionally denormalized. They make the latest current
+index useful for table views and filters without copying full validation results into history.
+Product change events are still driven by readiness, status, and issue identity changes.
 
 ### `validation_change_events`
 
@@ -187,11 +202,27 @@ QUALIFY ROW_NUMBER() OVER (
 Current failing products/styles:
 
 ```sql
-SELECT *
+SELECT product_id, display_name, brand, season, score, failure_count,
+       hard_warning_count, soft_warning_count
 FROM validation_result_index_current
 WHERE target = 'dpp'
   AND ready = false
-ORDER BY product_id;
+ORDER BY brand, season, display_name;
+```
+
+Dashboard completion by brand and season:
+
+```sql
+SELECT brand, season, COUNT(*) AS records,
+       SUM(CASE WHEN ready THEN 1 ELSE 0 END) AS ready_records,
+       ROUND(AVG(score), 2) AS average_score,
+       SUM(failure_count) AS failures,
+       SUM(hard_warning_count) AS hard_warnings,
+       SUM(soft_warning_count) AS soft_warnings
+FROM validation_result_index_current
+WHERE target = 'dpp'
+GROUP BY brand, season
+ORDER BY brand, season;
 ```
 
 ## Historical Truth

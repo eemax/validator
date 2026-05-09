@@ -28,6 +28,17 @@ class ValidationIndexRow:
     issue_hash: str
     issue_codes: tuple[str, ...]
     issue_severities: dict[str, str]
+    display_name: str | None = None
+    brand: str | None = None
+    season: str | None = None
+    season_year: int | None = None
+    group_key: str | None = None
+    score: float | None = None
+    issue_count: int = 0
+    failure_count: int = 0
+    hard_warning_count: int = 0
+    soft_warning_count: int = 0
+    updated_source_at: datetime | None = None
 
 
 _DURATION_PATTERN = re.compile(r"^(?P<count>[1-9][0-9]*)(?P<unit>[hdmy])$")
@@ -120,9 +131,11 @@ def record_validation_history(
                     """
                     INSERT INTO validation_result_index_current (
                         target, product_id, ready, status, issue_hash, issue_codes_json,
-                        issue_severities_json, updated_at, run_id
+                        issue_severities_json, display_name, brand, season, season_year,
+                        group_key, score, issue_count, failure_count, hard_warning_count,
+                        soft_warning_count, updated_source_at, updated_at, run_id
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         [
@@ -133,6 +146,17 @@ def record_validation_history(
                             row.issue_hash,
                             json.dumps(list(row.issue_codes), sort_keys=True),
                             json.dumps(row.issue_severities, sort_keys=True),
+                            row.display_name,
+                            row.brand,
+                            row.season,
+                            row.season_year,
+                            row.group_key,
+                            row.score,
+                            row.issue_count,
+                            row.failure_count,
+                            row.hard_warning_count,
+                            row.soft_warning_count,
+                            row.updated_source_at,
                             created_at,
                             run_id,
                         ]
@@ -179,12 +203,34 @@ def ensure_validation_history_tables(conn: duckdb.DuckDBPyConnection) -> None:
             issue_hash VARCHAR,
             issue_codes_json VARCHAR,
             issue_severities_json VARCHAR,
+            display_name VARCHAR,
+            brand VARCHAR,
+            season VARCHAR,
+            season_year INTEGER,
+            group_key VARCHAR,
+            score DOUBLE,
+            issue_count BIGINT,
+            failure_count BIGINT,
+            hard_warning_count BIGINT,
+            soft_warning_count BIGINT,
+            updated_source_at TIMESTAMP,
             updated_at TIMESTAMP,
             run_id VARCHAR,
             PRIMARY KEY (target, product_id)
         )
         """
     )
+    _ensure_column(conn, "validation_result_index_current", "display_name", "VARCHAR")
+    _ensure_column(conn, "validation_result_index_current", "brand", "VARCHAR")
+    _ensure_column(conn, "validation_result_index_current", "season", "VARCHAR")
+    _ensure_column(conn, "validation_result_index_current", "season_year", "INTEGER")
+    _ensure_column(conn, "validation_result_index_current", "group_key", "VARCHAR")
+    _ensure_column(conn, "validation_result_index_current", "score", "DOUBLE")
+    _ensure_column(conn, "validation_result_index_current", "issue_count", "BIGINT")
+    _ensure_column(conn, "validation_result_index_current", "failure_count", "BIGINT")
+    _ensure_column(conn, "validation_result_index_current", "hard_warning_count", "BIGINT")
+    _ensure_column(conn, "validation_result_index_current", "soft_warning_count", "BIGINT")
+    _ensure_column(conn, "validation_result_index_current", "updated_source_at", "TIMESTAMP")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS validation_change_events (
@@ -466,6 +512,8 @@ def _build_validation_index(run: Any) -> dict[str, ValidationIndexRow]:
         if not status:
             status = "ready" if ready is True else "failed" if ready is False else "unknown"
         issue_hash = _issue_hash(issues)
+        brand = _dashboard_string(result, "brand", "brand_code", "brand_name")
+        season = _dashboard_string(result, "season", "season_code")
         index[product_id] = ValidationIndexRow(
             product_id=product_id,
             ready=ready,
@@ -473,6 +521,17 @@ def _build_validation_index(run: Any) -> dict[str, ValidationIndexRow]:
             issue_hash=issue_hash,
             issue_codes=issue_codes,
             issue_severities=issue_severities,
+            display_name=_dashboard_string(result, "display_name", "style_name", "name"),
+            brand=brand,
+            season=season,
+            season_year=_season_year(season),
+            group_key=_dashboard_group_key(result, brand=brand, season=season),
+            score=_float_value(result, "score"),
+            issue_count=_issue_count(result, issues),
+            failure_count=_failure_count(result, issues),
+            hard_warning_count=_warning_count(result, issues, warning_level="hard"),
+            soft_warning_count=_warning_count(result, issues, warning_level="soft"),
+            updated_source_at=_updated_source_at(result),
         )
     return index
 
@@ -553,6 +612,26 @@ def _has_table(conn: duckdb.DuckDBPyConnection, table_name: str) -> bool:
     return bool(row and row[0])
 
 
+def _ensure_column(
+    conn: duckdb.DuckDBPyConnection,
+    table_name: str,
+    column_name: str,
+    column_type: str,
+) -> None:
+    row = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM information_schema.columns
+        WHERE table_name = ?
+          AND column_name = ?
+        """,
+        [table_name, column_name],
+    ).fetchone()
+    if row and row[0]:
+        return
+    conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+
+
 def _index_row_changed(previous: ValidationIndexRow, current: ValidationIndexRow) -> bool:
     return (
         previous.ready != current.ready
@@ -631,6 +710,127 @@ def _result_value(value: Any, key: str, *, default: Any) -> Any:
     if isinstance(value, dict):
         return value.get(key, default)
     return getattr(value, key, default)
+
+
+def _dashboard_string(result: Any, *keys: str) -> str | None:
+    for key in keys:
+        value = _result_value(result, key, default=None)
+        if value is None:
+            continue
+        text = str(getattr(value, "value", value) or "").strip()
+        if text:
+            return text
+    return None
+
+
+def _dashboard_group_key(result: Any, *, brand: str | None, season: str | None) -> str | None:
+    explicit = _dashboard_string(result, "group_key")
+    if explicit:
+        return explicit
+    if brand or season:
+        return f"{brand or 'UNKNOWN'}|{season or 'UNKNOWN'}"
+    return None
+
+
+def _season_year(season: str | None) -> int | None:
+    if not season:
+        return None
+    digits = "".join(character for character in str(season) if character.isdigit())
+    if len(digits) < 2:
+        return None
+    return int(digits[-2:])
+
+
+def _float_value(result: Any, key: str) -> float | None:
+    value = _result_value(result, key, default=None)
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _int_value(result: Any, key: str) -> int | None:
+    value = _result_value(result, key, default=None)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _issue_count(result: Any, issues: list[Any]) -> int:
+    explicit = _int_value(result, "issue_count")
+    return explicit if explicit is not None else len(issues)
+
+
+def _failure_count(result: Any, issues: list[Any]) -> int:
+    for key in ("failure_count", "blocking_issue_count", "error_count"):
+        explicit = _int_value(result, key)
+        if explicit is not None:
+            return explicit
+    return sum(1 for issue in issues if _issue_severity(issue) == "error")
+
+
+def _warning_count(result: Any, issues: list[Any], *, warning_level: str) -> int:
+    explicit = _int_value(result, f"{warning_level}_warning_count")
+    if explicit is not None:
+        return explicit
+    if warning_level == "soft":
+        generic_warning_count = _int_value(result, "warning_count")
+        if generic_warning_count is not None:
+            hard_warning_count = _int_value(result, "hard_warning_count")
+            if hard_warning_count is not None:
+                return max(0, generic_warning_count - hard_warning_count)
+            return generic_warning_count
+    return sum(
+        1
+        for issue in issues
+        if _issue_severity(issue) == "warning"
+        and _result_value(issue, "warning_level", default=None) == warning_level
+    )
+
+
+def _updated_source_at(result: Any) -> datetime | None:
+    for key in (
+        "updated_source_at",
+        "source_updated_at",
+        "source_modified_at",
+        "latest_modified_at",
+        "modified_at",
+    ):
+        parsed = _parse_datetime(_result_value(result, key, default=None))
+        if parsed is not None:
+            return parsed
+    metrics = _result_value(result, "metrics", default=None)
+    if isinstance(metrics, dict):
+        for key in ("updated_source_at", "latest_modified_at", "modified_at"):
+            parsed = _parse_datetime(metrics.get(key))
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value
+        return value.astimezone(UTC).replace(tzinfo=None)
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed
+    return parsed.astimezone(UTC).replace(tzinfo=None)
 
 
 def _file_sha256(path: Path | None) -> str | None:

@@ -22,7 +22,23 @@ def _run(*, ready=True, issues=None):
         "results": [
             {
                 "style_id": "S1",
+                "style_name": "Style One",
+                "brand": "CRAFT",
+                "season": "AW27",
                 "ready": ready,
+                "status": "passed" if ready else "failed",
+                "score": 82.5,
+                "issue_count": len(issues),
+                "blocking_issue_count": sum(
+                    1 for issue in issues if issue.get("severity") == "error"
+                ),
+                "hard_warning_count": sum(
+                    1 for issue in issues if issue.get("warning_level") == "hard"
+                ),
+                "soft_warning_count": sum(
+                    1 for issue in issues if issue.get("warning_level") == "soft"
+                ),
+                "updated_source_at": "2026-05-08T07:30:00Z",
                 "issues": issues,
             }
         ],
@@ -84,12 +100,28 @@ def test_validation_history_records_current_index_and_change_events(tmp_path: Pa
     with duckdb.connect(str(db_path), read_only=True) as conn:
         current = conn.execute(
             """
-            SELECT ready, issue_codes_json
+            SELECT ready, issue_codes_json, display_name, brand, season, season_year, group_key,
+                   score, issue_count, failure_count, hard_warning_count, soft_warning_count,
+                   updated_source_at
             FROM validation_result_index_current
             WHERE target = 'md' AND product_id = 'S1'
             """
         ).fetchone()
-    assert current == (True, "[]")
+    assert current == (
+        True,
+        "[]",
+        "Style One",
+        "CRAFT",
+        "AW27",
+        27,
+        "CRAFT|AW27",
+        82.5,
+        0,
+        0,
+        0,
+        0,
+        datetime(2026, 5, 8, 7, 30),
+    )
 
 
 def test_parse_history_since_supports_absolute_minutes_and_relative_durations() -> None:
@@ -101,6 +133,66 @@ def test_parse_history_since_supports_absolute_minutes_and_relative_durations() 
     assert parse_history_since("2d", now=now) == datetime(2026, 5, 6, 6, 30)
     assert parse_history_since("3m", now=now) == datetime(2026, 2, 8, 6, 30)
     assert parse_history_since("1y", now=now) == datetime(2025, 5, 8, 6, 30)
+
+
+def test_validation_history_adds_dashboard_columns_to_existing_current_index(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "centric.duckdb"
+    input_path = tmp_path / "products.jsonl"
+    result_path = tmp_path / "results.json"
+    input_path.write_text('{"style_id":"S1"}\n', encoding="utf-8")
+    with duckdb.connect(str(db_path)) as conn:
+        conn.execute(
+            """
+            CREATE TABLE validation_result_index_current (
+                target VARCHAR NOT NULL,
+                product_id VARCHAR NOT NULL,
+                ready BOOLEAN,
+                status VARCHAR,
+                issue_hash VARCHAR,
+                issue_codes_json VARCHAR,
+                issue_severities_json VARCHAR,
+                updated_at TIMESTAMP,
+                run_id VARCHAR,
+                PRIMARY KEY (target, product_id)
+            )
+            """
+        )
+
+    run = _run()
+    write_json(result_path, run)
+    record_validation_history(
+        db_path,
+        target="md",
+        run=run,
+        input_path=input_path,
+        latest_result_path=result_path,
+    )
+
+    with duckdb.connect(str(db_path), read_only=True) as conn:
+        columns = {
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = 'validation_result_index_current'
+                """
+            ).fetchall()
+        }
+    assert {
+        "display_name",
+        "brand",
+        "season",
+        "season_year",
+        "group_key",
+        "score",
+        "failure_count",
+        "hard_warning_count",
+        "soft_warning_count",
+        "updated_source_at",
+    }.issubset(columns)
 
 
 def _issue(code: str, severity: str) -> dict[str, object]:
