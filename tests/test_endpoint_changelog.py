@@ -71,6 +71,89 @@ def test_endpoint_changelog_records_added_changed_and_removed_events(tmp_path: P
     }
 
 
+def test_endpoint_changelog_can_update_changed_record_ids_only(tmp_path: Path) -> None:
+    db_path = tmp_path / "centric.duckdb"
+    config = load_endpoint_changelog_config(_write_changelog_config(tmp_path / "changelog.yml"))
+    _write_endpoint_records(
+        db_path,
+        [
+            ("styles", "S1", {"id": "S1", "node_name": "A", "active": True}),
+            ("styles", "S2", {"id": "S2", "node_name": "B", "active": True}),
+        ],
+    )
+    baseline = record_endpoint_changelog(db_path, config=config)
+
+    _write_endpoint_records(
+        db_path,
+        [
+            ("styles", "S1", {"id": "S1", "node_name": "A2", "active": True}),
+            ("styles", "S2", {"id": "S2", "node_name": "B2", "active": True}),
+        ],
+    )
+    scoped = record_endpoint_changelog(
+        db_path,
+        config=config,
+        endpoints={"styles"},
+        record_ids_by_endpoint={"styles": {"S1"}},
+        deleted_record_ids_by_endpoint={},
+    )
+
+    assert baseline.full_refresh is True
+    assert scoped.full_refresh is False
+    assert scoped.scoped_record_count == 1
+    assert scoped.record_count == 1
+    changes = list_endpoint_changes(db_path, endpoint="styles", limit=10)
+    scoped_changes = [row for row in changes if row["run_id"] == scoped.run_id]
+    assert [(row["record_id"], row["change_type"]) for row in scoped_changes] == [
+        ("S1", "changed")
+    ]
+    with duckdb.connect(str(db_path), read_only=True) as conn:
+        index_rows = conn.execute(
+            """
+            SELECT record_id, tracked_payload_json
+            FROM endpoint_changelog_index_current
+            WHERE endpoint = 'styles'
+            ORDER BY record_id
+            """
+        ).fetchall()
+    assert len(index_rows) == 2
+    assert '"A2"' in index_rows[0][1]
+    assert '"B"' in index_rows[1][1]
+
+
+def test_endpoint_changelog_record_scope_removes_deleted_ids(tmp_path: Path) -> None:
+    db_path = tmp_path / "centric.duckdb"
+    config = load_endpoint_changelog_config(_write_changelog_config(tmp_path / "changelog.yml"))
+    _write_endpoint_records(
+        db_path,
+        [
+            ("styles", "S1", {"id": "S1", "node_name": "A", "active": True}),
+            ("styles", "S2", {"id": "S2", "node_name": "B", "active": True}),
+        ],
+    )
+    record_endpoint_changelog(db_path, config=config)
+    _write_endpoint_records(
+        db_path,
+        [("styles", "S2", {"id": "S2", "node_name": "B", "active": True})],
+    )
+
+    scoped = record_endpoint_changelog(
+        db_path,
+        config=config,
+        endpoints={"styles"},
+        record_ids_by_endpoint={},
+        deleted_record_ids_by_endpoint={"styles": {"S1"}},
+    )
+
+    assert scoped.full_refresh is False
+    assert scoped.event_count == 1
+    changes = list_endpoint_changes(db_path, endpoint="styles", limit=10)
+    scoped_changes = [row for row in changes if row["run_id"] == scoped.run_id]
+    assert [(row["record_id"], row["change_type"]) for row in scoped_changes] == [
+        ("S1", "removed")
+    ]
+
+
 def test_endpoint_changelog_config_resolves_from_private_config_dir(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

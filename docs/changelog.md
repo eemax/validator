@@ -22,7 +22,23 @@ Record a changelog run:
 
 ```bash
 uv run centric-mdm changelog update
+uv run centric-mdm changelog update --endpoint styles --endpoint materials
 ```
+
+`changelog update` is a manual full refresh for all configured endpoints, or for selected
+endpoints when `--endpoint` is provided.
+
+`ingest` chains changelog updates by default when a changelog config exists:
+
+```bash
+uv run centric-mdm ingest
+uv run centric-mdm ingest --no-changelog
+uv run centric-mdm ingest --changelog-config .local/changelog.yml
+```
+
+When chained from ingest, changelog uses the applied raw files to update only affected record ids.
+If there is no baseline yet, or if the field-selection config changed for an affected endpoint, it
+automatically performs a full refresh for that endpoint.
 
 Inspect runs and changes:
 
@@ -92,6 +108,8 @@ Important columns:
 - `endpoint_count`: configured endpoints.
 - `record_count`: current endpoint records tracked.
 - `event_count`: change events written.
+- `full_refresh`: true when the run refreshed full endpoint indexes.
+- `scoped_record_count`: affected record ids supplied by ingest for record-scoped runs.
 
 ### `endpoint_changelog_index_current`
 
@@ -99,6 +117,9 @@ Current compact tracked state, one row per configured endpoint record.
 
 This table is not append-only. Each changelog update replaces rows for endpoints in the current
 config with the latest tracked payload hash and compact payload JSON.
+
+For record-scoped ingest updates, only affected record ids are replaced or removed. Full refreshes
+replace all current index rows for the selected endpoints.
 
 ### `endpoint_change_events`
 

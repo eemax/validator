@@ -43,6 +43,26 @@ class IngestResult:
     records_upserted: int
     records_deleted: int
     endpoints: dict[str, int]
+    upserted_record_ids_by_endpoint: dict[str, tuple[str, ...]]
+    deleted_record_ids_by_endpoint: dict[str, tuple[str, ...]]
+
+    @property
+    def changed_record_ids_by_endpoint(self) -> dict[str, tuple[str, ...]]:
+        merged: dict[str, tuple[str, ...]] = {}
+        for endpoint in sorted(
+            set(self.upserted_record_ids_by_endpoint) | set(self.deleted_record_ids_by_endpoint)
+        ):
+            merged[endpoint] = tuple(
+                sorted(
+                    set(self.upserted_record_ids_by_endpoint.get(endpoint, ()))
+                    | set(self.deleted_record_ids_by_endpoint.get(endpoint, ()))
+                )
+            )
+        return merged
+
+    @property
+    def changed_endpoints(self) -> tuple[str, ...]:
+        return tuple(self.changed_record_ids_by_endpoint)
 
 
 @dataclass(frozen=True)
@@ -90,6 +110,8 @@ def ingest_raw_dir(
     records_read = 0
     records_upserted = 0
     records_deleted = 0
+    upserted_record_ids_by_endpoint: defaultdict[str, set[str]] = defaultdict(set)
+    deleted_record_ids_by_endpoint: defaultdict[str, set[str]] = defaultdict(set)
 
     with duckdb.connect(str(db_path)) as conn:
         initialize_store(conn)
@@ -127,7 +149,13 @@ def ingest_raw_dir(
 
             conn.execute("BEGIN TRANSACTION")
             try:
-                file_record_count, file_upserts, file_deletes = _apply_records_for_file(
+                (
+                    file_record_count,
+                    file_upserts,
+                    file_deletes,
+                    file_upserted_ids,
+                    file_deleted_ids,
+                ) = _apply_records_for_file(
                     conn,
                     raw_file=raw_file,
                     schema=schema,
@@ -168,6 +196,8 @@ def ingest_raw_dir(
             records_upserted += file_upserts
             records_deleted += file_deletes
             endpoints[raw_file.endpoint] += file_record_count
+            upserted_record_ids_by_endpoint[raw_file.endpoint].update(file_upserted_ids)
+            deleted_record_ids_by_endpoint[raw_file.endpoint].update(file_deleted_ids)
             _emit_ingest_progress(
                 progress,
                 action="applied",
@@ -186,6 +216,14 @@ def ingest_raw_dir(
         records_upserted=records_upserted,
         records_deleted=records_deleted,
         endpoints=dict(sorted(endpoints.items())),
+        upserted_record_ids_by_endpoint={
+            endpoint: tuple(sorted(record_ids))
+            for endpoint, record_ids in sorted(upserted_record_ids_by_endpoint.items())
+        },
+        deleted_record_ids_by_endpoint={
+            endpoint: tuple(sorted(record_ids))
+            for endpoint, record_ids in sorted(deleted_record_ids_by_endpoint.items())
+        },
     )
 
 
@@ -945,7 +983,7 @@ def _apply_records_for_file(
     raw_file: RawFile,
     schema: EndpointSchema,
     ingested_at: str,
-) -> tuple[int, int, int]:
+) -> tuple[int, int, int, tuple[str, ...], tuple[str, ...]]:
     conn.execute("DROP TABLE IF EXISTS ingest_stage")
     modified_expr = _modified_at_sql_expr(schema)
     modified_ts_expr = _modified_at_ts_sql_expr(schema)
@@ -1042,6 +1080,28 @@ def _apply_records_for_file(
     file_upserts = conn.execute(
         "SELECT COUNT(*) FROM ingest_applicable WHERE NOT is_delete"
     ).fetchone()[0]
+    deleted_record_ids = tuple(
+        str(row[0])
+        for row in conn.execute(
+            """
+            SELECT record_id
+            FROM ingest_applicable
+            WHERE is_delete
+            ORDER BY record_id
+            """
+        ).fetchall()
+    )
+    upserted_record_ids = tuple(
+        str(row[0])
+        for row in conn.execute(
+            """
+            SELECT record_id
+            FROM ingest_applicable
+            WHERE NOT is_delete
+            ORDER BY record_id
+            """
+        ).fetchall()
+    )
 
     conn.execute(
         """
@@ -1064,7 +1124,13 @@ def _apply_records_for_file(
         WHERE NOT is_delete
         """
     )
-    return int(file_record_count), int(file_upserts), int(file_deletes)
+    return (
+        int(file_record_count),
+        int(file_upserts),
+        int(file_deletes),
+        upserted_record_ids,
+        deleted_record_ids,
+    )
 
 
 def _modified_at_sql_expr(schema: EndpointSchema) -> str:

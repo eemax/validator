@@ -85,6 +85,9 @@ uv run centric-mdm ingest \
   --db data/centric.duckdb
 ```
 
+When a changelog config exists, `ingest` also updates the endpoint changelog for affected record
+ids. Use `--no-changelog` to skip that chained update.
+
 Build the aggregate reconstruction check from the current DuckDB state:
 
 ```bash
@@ -143,10 +146,12 @@ changelog query examples.
 
 Endpoint semantic changes can also be tracked without archiving duplicate full payloads. The
 changelog reads current DuckDB endpoint state, keeps only fields selected in a private YAML config,
-and writes compact before/after events:
+and writes compact before/after events. Manual `changelog update` does a full refresh; ingest
+chains record-scoped changelog updates by default after the first baseline/config refresh:
 
 ```bash
 uv run centric-mdm changelog update
+uv run centric-mdm changelog update --endpoint styles
 uv run centric-mdm changelog summary --since 2d
 uv run centric-mdm changelog changes --endpoint styles --since 10h
 ```

@@ -92,8 +92,11 @@ def test_ingest_raw_dir_applies_delta_once_and_keeps_newest_record(tmp_path) -> 
     second = ingest_raw_dir(raw_dir, db_path, schemas=load_endpoint_schemas())
 
     assert first.applied_files == 2
+    assert first.upserted_record_ids_by_endpoint == {"styles": ("S1",)}
+    assert first.changed_record_ids_by_endpoint == {"styles": ("S1",)}
     assert second.applied_files == 0
     assert second.skipped_files == 2
+    assert second.changed_record_ids_by_endpoint == {}
     with duckdb.connect(str(db_path)) as conn:
         records = load_current_endpoint_records(conn)
     assert records["styles"][0]["node_name"] == "Updated Jacket"
@@ -194,6 +197,8 @@ def test_ingest_raw_dir_applies_active_false_as_delete(tmp_path, monkeypatch) ->
     master_result = rebuild_master_reconstruction(db_path)
 
     assert result.records_deleted == 1
+    assert result.deleted_record_ids_by_endpoint == {"styles": ("S1",)}
+    assert result.changed_record_ids_by_endpoint == {"styles": ("S1",)}
     assert master_result.products_reconstructed == 0
 
 

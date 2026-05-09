@@ -1,5 +1,6 @@
 import json
 
+import duckdb
 from typer.testing import CliRunner
 
 from centric_mdm_validation.cli import app
@@ -355,6 +356,76 @@ def validate_projected_products(target, payloads, *, rules=None):
     assert result.exit_code == 0
     assert explicit_output.is_file()
     assert not (tmp_path / "data" / "results" / "runs").exists()
+
+
+def test_history_commands_print_query_context_for_empty_store(tmp_path) -> None:
+    result = CliRunner().invoke(
+        app,
+        [
+            "history",
+            "runs",
+            "--target",
+            "dpp",
+            "--since",
+            "2d",
+            "--db",
+            str(tmp_path / "centric.duckdb"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "History: reading validation runs from" in result.output
+    assert "History: filters: target=dpp, since=2d" in result.output
+    assert "History: no validation runs found" in result.output
+    assert "centric-mdm validate" in result.output
+
+
+def test_changelog_update_prints_config_and_tracking_context(tmp_path) -> None:
+    db_path = tmp_path / "centric.duckdb"
+    config_path = tmp_path / "changelog.yml"
+    config_path.write_text(
+        """
+endpoints:
+  styles:
+    fields:
+      - id
+      - node_name
+""",
+        encoding="utf-8",
+    )
+    with duckdb.connect(str(db_path)) as conn:
+        conn.execute(
+            """
+            CREATE TABLE endpoint_records (
+                endpoint VARCHAR NOT NULL,
+                record_id VARCHAR NOT NULL,
+                payload VARCHAR NOT NULL,
+                PRIMARY KEY (endpoint, record_id)
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO endpoint_records VALUES ('styles', 'S1', ?)",
+            [json.dumps({"id": "S1", "node_name": "Seed Jacket"})],
+        )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "changelog",
+            "update",
+            "--db",
+            str(db_path),
+            "--config",
+            str(config_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert f"Changelog: using config {config_path}" in result.output
+    assert "Changelog: tracking 1 endpoint(s), 2 selected fields" in result.output
+    assert "Changelog: endpoints: styles" in result.output
+    assert "OK Endpoint changelog updated (full refresh): 1 records tracked" in result.output
 
 
 def test_report_accepts_existing_validation_result_json(tmp_path, monkeypatch) -> None:

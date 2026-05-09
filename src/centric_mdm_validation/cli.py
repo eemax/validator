@@ -9,6 +9,7 @@ from pathlib import Path
 from textwrap import dedent
 from typing import Annotated
 
+import duckdb
 import typer
 
 from centric_mdm_validation.centric.cli import main as fetcher_main
@@ -258,6 +259,7 @@ Inspect validation history:
 
 Track endpoint semantic changes:
   uv run centric-mdm changelog update
+  uv run centric-mdm changelog update --endpoint styles
   uv run centric-mdm changelog summary --since 2d
   uv run centric-mdm changelog changes --endpoint styles --since 10h
 
@@ -336,10 +338,27 @@ def history_runs(
     """List validation history runs."""
 
     since_dt = _parse_history_since_or_fail(since)
-    rows = list_validation_runs(db, target=target, since=since_dt, limit=limit)
+    filters = _history_filter_text(target=target, since=since, limit=limit)
+    _echo_step(f"History: reading validation runs from {db}")
+    _echo_step(f"History: filters: {filters}")
+    try:
+        rows = list_validation_runs(db, target=target, since=since_dt, limit=limit)
+    except duckdb.Error as exc:
+        _fail_duckdb(db, exc)
     if not rows:
-        _echo_step("History: no validation runs found.")
+        _echo_step(f"History: no validation runs found ({filters}).")
+        _echo_step(
+            "History: run `centric-mdm validate` or `centric-mdm pipeline --target ...` first."
+        )
         return
+    total_records = sum(int(row["total_records"] or 0) for row in rows)
+    ready_records = sum(int(row["ready_records"] or 0) for row in rows)
+    product_changes = sum(int(row["product_changes"] or 0) for row in rows)
+    issue_changes = sum(int(row["issue_changes"] or 0) for row in rows)
+    _echo_done(
+        f"History: showing {len(rows)} run(s), {ready_records}/{total_records} ready records, "
+        f"{product_changes} product changes, {issue_changes} issue changes."
+    )
     _print_history_table(
         ["created_at", "target", "run_id", "ready", "changes", "issue_changes"],
         [
@@ -381,10 +400,21 @@ def history_changes(
     """List changed products from validation history."""
 
     since_dt = _parse_history_since_or_fail(since)
-    rows = list_validation_changes(db, target=target, since=since_dt, limit=limit)
+    filters = _history_filter_text(target=target, since=since, limit=limit)
+    _echo_step(f"History: reading product validation changes from {db}")
+    _echo_step(f"History: filters: {filters}")
+    try:
+        rows = list_validation_changes(db, target=target, since=since_dt, limit=limit)
+    except duckdb.Error as exc:
+        _fail_duckdb(db, exc)
     if not rows:
-        _echo_step("History: no validation changes found.")
+        _echo_step(f"History: no validation changes found ({filters}).")
         return
+    change_counts = _count_values(row["change_type"] for row in rows)
+    _echo_done(
+        f"History: showing {len(rows)} changed product(s): "
+        f"{_format_count_summary(change_counts)}."
+    )
     _print_history_table(
         ["changed_at", "target", "product_id", "change", "status", "issues"],
         [
@@ -428,10 +458,22 @@ def history_issues(
     """Summarize added/resolved issue codes from validation history."""
 
     since_dt = _parse_history_since_or_fail(since)
-    rows = list_validation_issue_counts(db, target=target, since=since_dt, limit=limit)
+    filters = _history_filter_text(target=target, since=since, limit=limit)
+    _echo_step(f"History: reading issue-code changes from {db}")
+    _echo_step(f"History: filters: {filters}")
+    try:
+        rows = list_validation_issue_counts(db, target=target, since=since_dt, limit=limit)
+    except duckdb.Error as exc:
+        _fail_duckdb(db, exc)
     if not rows:
-        _echo_step("History: no validation issue changes found.")
+        _echo_step(f"History: no validation issue changes found ({filters}).")
         return
+    issue_changes = sum(int(row["count"] or 0) for row in rows)
+    change_counts = _count_weighted((row["change_type"], row["count"]) for row in rows)
+    _echo_done(
+        f"History: showing {len(rows)} issue-code bucket(s), {issue_changes} issue events: "
+        f"{_format_count_summary(change_counts)}."
+    )
     _print_history_table(
         ["target", "issue_code", "change", "severity", "count"],
         [
@@ -449,6 +491,10 @@ def history_issues(
 
 @changelog_app.command("update")
 def changelog_update(
+    endpoint: Annotated[
+        list[str] | None,
+        typer.Option("--endpoint", "-e", help="Endpoint to refresh. Repeat for multiple."),
+    ] = None,
     db: Annotated[
         Path,
         typer.Option("--db", help="DuckDB reconstruction store."),
@@ -468,12 +514,31 @@ def changelog_update(
 
     try:
         changelog_config = load_endpoint_changelog_config(config)
-        changelog_run = record_endpoint_changelog(db, config=changelog_config)
+        endpoint_names = sorted(changelog_config.endpoints)
+        requested_endpoints = set(endpoint or [])
+        if requested_endpoints:
+            endpoint_names = sorted(requested_endpoints & set(changelog_config.endpoints))
+        field_count = sum(len(changelog_config.endpoints[name].fields) for name in endpoint_names)
+        _echo_step(f"Changelog: using config {changelog_config.path}")
+        _echo_step(
+            f"Changelog: tracking {len(endpoint_names)} endpoint(s), {field_count} selected fields"
+        )
+        _echo_step(f"Changelog: endpoints: {_format_list(endpoint_names)}")
+        _echo_step(f"Changelog: updating semantic endpoint index in {db}")
+        changelog_run = record_endpoint_changelog(
+            db,
+            config=changelog_config,
+            endpoints=requested_endpoints or None,
+            full=True,
+        )
+    except duckdb.Error as exc:
+        _fail_duckdb(db, exc)
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="--config") from exc
+    mode = "full refresh" if changelog_run.full_refresh else "record-scoped"
     _echo_done(
-        f"Endpoint changelog updated: {changelog_run.record_count} records tracked across "
-        f"{changelog_run.endpoint_count} endpoints, {changelog_run.event_count} events. "
+        f"Endpoint changelog updated ({mode}): {changelog_run.record_count} records tracked "
+        f"across {changelog_run.endpoint_count} endpoints, {changelog_run.event_count} events. "
         f"Run: {changelog_run.run_id}"
     )
 
@@ -499,16 +564,29 @@ def changelog_runs(
     """List endpoint changelog runs."""
 
     since_dt = _parse_history_since_or_fail(since)
-    rows = list_endpoint_changelog_runs(db, since=since_dt, limit=limit)
+    filters = _history_filter_text(since=since, limit=limit)
+    _echo_step(f"Changelog: reading changelog runs from {db}")
+    _echo_step(f"Changelog: filters: {filters}")
+    try:
+        rows = list_endpoint_changelog_runs(db, since=since_dt, limit=limit)
+    except duckdb.Error as exc:
+        _fail_duckdb(db, exc)
     if not rows:
-        _echo_step("Changelog: no endpoint changelog runs found.")
+        _echo_step(f"Changelog: no endpoint changelog runs found ({filters}).")
+        _echo_step("Changelog: run `centric-mdm changelog update` to create the first baseline.")
         return
+    records = sum(int(row["record_count"] or 0) for row in rows)
+    events = sum(int(row["event_count"] or 0) for row in rows)
+    _echo_done(
+        f"Changelog: showing {len(rows)} run(s), {records} tracked records, {events} events."
+    )
     _print_history_table(
-        ["created_at", "run_id", "endpoints", "records", "events", "config"],
+        ["created_at", "run_id", "mode", "endpoints", "records", "events", "config"],
         [
             {
                 "created_at": _format_history_datetime(row["created_at"]),
                 "run_id": row["run_id"],
+                "mode": "full" if row["full_refresh"] else "scoped",
                 "endpoints": row["endpoint_count"],
                 "records": row["record_count"],
                 "events": row["event_count"],
@@ -540,10 +618,23 @@ def changelog_summary(
     """Summarize endpoint changes by endpoint and change type."""
 
     since_dt = _parse_history_since_or_fail(since)
-    rows = list_endpoint_change_summary(db, since=since_dt, limit=limit)
+    filters = _history_filter_text(since=since, limit=limit)
+    _echo_step(f"Changelog: reading endpoint change summary from {db}")
+    _echo_step(f"Changelog: filters: {filters}")
+    try:
+        rows = list_endpoint_change_summary(db, since=since_dt, limit=limit)
+    except duckdb.Error as exc:
+        _fail_duckdb(db, exc)
     if not rows:
-        _echo_step("Changelog: no endpoint changes found.")
+        _echo_step(f"Changelog: no endpoint changes found ({filters}).")
         return
+    total = sum(int(row["count"] or 0) for row in rows)
+    endpoints = len({row["endpoint"] for row in rows})
+    change_counts = _count_weighted((row["change_type"], row["count"]) for row in rows)
+    _echo_done(
+        f"Changelog: showing {total} event(s) across {endpoints} endpoint(s): "
+        f"{_format_count_summary(change_counts)}."
+    )
     _print_history_table(
         ["endpoint", "change", "count"],
         [
@@ -582,10 +673,22 @@ def changelog_changes(
     """List changed endpoint records."""
 
     since_dt = _parse_history_since_or_fail(since)
-    rows = list_endpoint_changes(db, endpoint=endpoint, since=since_dt, limit=limit)
+    filters = _history_filter_text(endpoint=endpoint, since=since, limit=limit)
+    _echo_step(f"Changelog: reading endpoint record changes from {db}")
+    _echo_step(f"Changelog: filters: {filters}")
+    try:
+        rows = list_endpoint_changes(db, endpoint=endpoint, since=since_dt, limit=limit)
+    except duckdb.Error as exc:
+        _fail_duckdb(db, exc)
     if not rows:
-        _echo_step("Changelog: no endpoint changes found.")
+        _echo_step(f"Changelog: no endpoint changes found ({filters}).")
         return
+    change_counts = _count_values(row["change_type"] for row in rows)
+    endpoints = len({row["endpoint"] for row in rows})
+    _echo_done(
+        f"Changelog: showing {len(rows)} changed record(s) across {endpoints} endpoint(s): "
+        f"{_format_count_summary(change_counts)}."
+    )
     _print_history_table(
         ["changed_at", "endpoint", "record_id", "change", "fields"],
         [
@@ -717,6 +820,17 @@ def ingest(
         Path | None,
         typer.Option("--schema", help="Endpoint merge schema YAML."),
     ] = None,
+    update_changelog: Annotated[
+        bool,
+        typer.Option(
+            "--changelog/--no-changelog",
+            help="Update the endpoint changelog for records changed by ingest when config exists.",
+        ),
+    ] = True,
+    changelog_config: Annotated[
+        Path | None,
+        typer.Option("--changelog-config", help="Endpoint changelog field-selection YAML."),
+    ] = None,
     progress: ProgressOption = None,
 ) -> None:
     """Catch up the DuckDB reconstruction store from immutable raw endpoint files."""
@@ -727,6 +841,8 @@ def ingest(
             raw_dir=raw_dir,
             db=db,
             schema=schema,
+            update_changelog=update_changelog,
+            changelog_config=changelog_config,
             progress=progress_reporter,
         )
     _echo_done(
@@ -804,6 +920,17 @@ def pipeline(
         Path | None,
         typer.Option("--schema", help="Endpoint merge schema YAML."),
     ] = None,
+    update_changelog: Annotated[
+        bool,
+        typer.Option(
+            "--changelog/--no-changelog",
+            help="Update the endpoint changelog after ingest when config exists.",
+        ),
+    ] = True,
+    changelog_config: Annotated[
+        Path | None,
+        typer.Option("--changelog-config", help="Endpoint changelog field-selection YAML."),
+    ] = None,
     rules: RulesOption = None,
     validation_output: Annotated[
         Path | None,
@@ -843,6 +970,8 @@ def pipeline(
         reconstruction_output=reconstruction_output,
         target=target,
         schema=schema,
+        update_changelog=update_changelog,
+        changelog_config=changelog_config,
         rules=rules,
         validation_output=validation_output,
         report_output_dir=report_output_dir,
@@ -859,6 +988,8 @@ def _run_pipeline_once(
     reconstruction_output: Path | None,
     target: str,
     schema: Path | None,
+    update_changelog: bool,
+    changelog_config: Path | None,
     rules: Path | None,
     validation_output: Path | None,
     report_output_dir: Path | None,
@@ -884,6 +1015,8 @@ def _run_pipeline_once(
             raw_dir=raw_dir,
             db=db,
             schema=schema,
+            update_changelog=update_changelog,
+            changelog_config=changelog_config,
             progress=progress_reporter,
         )
         progress_reporter.finish_overall_stage()
@@ -1038,6 +1171,8 @@ def _run_delta_daemon_pipeline(
         reconstruction_output=None,
         target=target,
         schema=None,
+        update_changelog=True,
+        changelog_config=None,
         rules=None,
         validation_output=None,
         report_output_dir=None,
@@ -1158,6 +1293,8 @@ def _run_ingest(
     db: Path,
     schema: Path | None,
     *,
+    update_changelog: bool = True,
+    changelog_config: Path | None = None,
     progress: ProgressReporter | None = None,
 ):
     raw_files = discover_raw_files(raw_dir)
@@ -1184,7 +1321,61 @@ def _run_ingest(
             f"{endpoint}={count}" for endpoint, count in result.endpoints.items()
         )
         _echo_step(f"Ingest: records read by endpoint: {endpoint_counts}")
+    if update_changelog:
+        _run_changelog_after_ingest(db, result, changelog_config=changelog_config)
     return result
+
+
+def _run_changelog_after_ingest(db: Path, ingest_result, *, changelog_config: Path | None) -> None:
+    if not ingest_result.changed_endpoints:
+        _echo_step("Changelog: skipped, no endpoint records changed during ingest.")
+        return
+    try:
+        config = load_endpoint_changelog_config(changelog_config)
+    except ValueError as exc:
+        if changelog_config is None and "not found" in str(exc):
+            _echo_step("Changelog: skipped, no changelog config found.")
+            return
+        raise typer.BadParameter(str(exc), param_hint="--changelog-config") from exc
+
+    changed_endpoints = set(ingest_result.changed_endpoints)
+    configured_endpoints = changed_endpoints & set(config.endpoints)
+    if not configured_endpoints:
+        _echo_step(
+            "Changelog: skipped, changed endpoints are not configured for changelog tracking."
+        )
+        return
+
+    changed_record_ids = {
+        endpoint: set(record_ids)
+        for endpoint, record_ids in ingest_result.changed_record_ids_by_endpoint.items()
+        if endpoint in configured_endpoints
+    }
+    deleted_record_ids = {
+        endpoint: set(record_ids)
+        for endpoint, record_ids in ingest_result.deleted_record_ids_by_endpoint.items()
+        if endpoint in configured_endpoints
+    }
+    _echo_step(
+        f"Changelog: updating {len(configured_endpoints)} affected endpoint(s): "
+        f"{_format_list(sorted(configured_endpoints))}"
+    )
+    try:
+        run = record_endpoint_changelog(
+            db,
+            config=config,
+            endpoints=configured_endpoints,
+            record_ids_by_endpoint=changed_record_ids,
+            deleted_record_ids_by_endpoint=deleted_record_ids,
+        )
+    except duckdb.Error as exc:
+        _fail_duckdb(db, exc)
+    mode = "full refresh" if run.full_refresh else "record-scoped"
+    _echo_done(
+        f"Changelog updated ({mode}): {run.scoped_record_count} changed record ids, "
+        f"{run.record_count} current records scanned, {run.event_count} events. "
+        f"Run: {run.run_id}"
+    )
 
 
 def _rich_ingest_progress(progress: ProgressReporter):
@@ -1330,6 +1521,53 @@ def _format_history_datetime(value) -> str:
     return str(value)
 
 
+def _history_filter_text(
+    *,
+    target: str | None = None,
+    endpoint: str | None = None,
+    since: str | None = None,
+    limit: int | None = None,
+) -> str:
+    parts = []
+    if target is not None:
+        parts.append(f"target={target}")
+    if endpoint is not None:
+        parts.append(f"endpoint={endpoint}")
+    parts.append(f"since={since or 'all time'}")
+    if limit is not None:
+        parts.append(f"limit={limit}")
+    return ", ".join(parts)
+
+
+def _count_values(values) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value in values:
+        key = str(value or "unknown")
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _count_weighted(pairs) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value, count in pairs:
+        key = str(value or "unknown")
+        counts[key] = counts.get(key, 0) + int(count or 0)
+    return counts
+
+
+def _format_count_summary(counts: dict[str, int]) -> str:
+    if not counts:
+        return "none"
+    return ", ".join(f"{key}={count}" for key, count in sorted(counts.items()))
+
+
+def _format_list(values: list[str], *, max_items: int = 12) -> str:
+    if len(values) <= max_items:
+        return ", ".join(values)
+    shown = ", ".join(values[:max_items])
+    return f"{shown}, ... (+{len(values) - max_items} more)"
+
+
 def _print_history_table(columns: list[str], rows: list[dict[str, object]]) -> None:
     widths = {
         column: max(len(column), *(len(str(row.get(column, ""))) for row in rows))
@@ -1339,6 +1577,18 @@ def _print_history_table(columns: list[str], rows: list[dict[str, object]]) -> N
     typer.echo("  ".join("-" * widths[column] for column in columns))
     for row in rows:
         typer.echo("  ".join(str(row.get(column, "")).ljust(widths[column]) for column in columns))
+
+
+def _fail_duckdb(db: Path, exc: Exception) -> None:
+    message = str(exc).strip().splitlines()[0] if str(exc).strip() else repr(exc)
+    _fail_with_guidance(
+        f"Could not open DuckDB store: {db}",
+        [
+            message,
+            "If another pipeline, ingest, or changelog update is running, wait for it to finish.",
+            "Then rerun the command.",
+        ],
+    )
 
 
 def _fail_with_guidance(message: str, guidance: list[str]) -> None:

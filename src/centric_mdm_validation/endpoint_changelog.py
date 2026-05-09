@@ -37,6 +37,8 @@ class EndpointChangelogRun:
     endpoint_count: int
     record_count: int
     event_count: int
+    full_refresh: bool = False
+    scoped_record_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -45,6 +47,7 @@ class EndpointChangelogIndexRow:
     record_id: str
     payload_hash: str
     tracked_payload_json: str
+    config_sha256: str | None = None
 
 
 def load_endpoint_changelog_config(path: Path | None = None) -> EndpointChangelogConfig:
@@ -104,6 +107,10 @@ def record_endpoint_changelog(
     db_path: Path,
     *,
     config: EndpointChangelogConfig,
+    endpoints: set[str] | None = None,
+    record_ids_by_endpoint: dict[str, set[str]] | None = None,
+    deleted_record_ids_by_endpoint: dict[str, set[str]] | None = None,
+    full: bool = False,
 ) -> EndpointChangelogRun:
     if not db_path.is_file():
         raise ValueError(f"DuckDB store not found. Run ingest first: {db_path}")
@@ -116,8 +123,39 @@ def record_endpoint_changelog(
                 f"DuckDB store has no endpoint_records table. Run ingest first: {db_path}"
             )
         run_id = _allocate_run_id(conn, created_at)
-        previous_index = _load_current_index(conn, endpoints=set(config.endpoints))
-        current_index = _build_current_index(conn, config)
+        has_record_scope = (
+            record_ids_by_endpoint is not None or deleted_record_ids_by_endpoint is not None
+        )
+        scoped_config, full_refresh = _scope_config(
+            conn,
+            config,
+            endpoints=endpoints,
+            full=full or not has_record_scope,
+        )
+        if not scoped_config.endpoints:
+            return EndpointChangelogRun(
+                run_id=run_id,
+                endpoint_count=0,
+                record_count=0,
+                event_count=0,
+                full_refresh=False,
+                scoped_record_count=0,
+            )
+        scoped_record_count = _scoped_record_count(record_ids_by_endpoint)
+        previous_index = _load_current_index(conn, endpoints=set(scoped_config.endpoints))
+        if full_refresh:
+            current_index = _build_current_index(conn, scoped_config)
+        else:
+            current_index = _build_scoped_current_index(
+                conn,
+                scoped_config,
+                record_ids_by_endpoint=record_ids_by_endpoint or {},
+            )
+            previous_index = _filter_previous_index_for_scoped_update(
+                previous_index,
+                current_index=current_index,
+                deleted_record_ids_by_endpoint=deleted_record_ids_by_endpoint or {},
+            )
         events = _diff_endpoint_indexes(
             run_id=run_id,
             changed_at=created_at,
@@ -127,23 +165,16 @@ def record_endpoint_changelog(
 
         conn.execute("BEGIN TRANSACTION")
         try:
-            conn.execute(
-                """
-                INSERT INTO endpoint_changelog_runs (
-                    run_id, created_at, config_path, config_sha256,
-                    endpoint_count, record_count, event_count
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    run_id,
-                    created_at,
-                    str(config.path),
-                    config.config_sha256,
-                    len(config.endpoints),
-                    len(current_index),
-                    len(events),
-                ],
+            _insert_run(
+                conn,
+                run_id=run_id,
+                created_at=created_at,
+                config=config,
+                endpoint_count=len(scoped_config.endpoints),
+                record_count=len(current_index),
+                event_count=len(events),
+                full_refresh=full_refresh,
+                scoped_record_count=scoped_record_count,
             )
             if events:
                 conn.executemany(
@@ -157,8 +188,8 @@ def record_endpoint_changelog(
                     """,
                     events,
                 )
-            endpoint_names = sorted(config.endpoints)
-            if endpoint_names:
+            endpoint_names = sorted(scoped_config.endpoints)
+            if full_refresh and endpoint_names:
                 conn.execute(
                     f"""
                     DELETE FROM endpoint_changelog_index_current
@@ -166,13 +197,23 @@ def record_endpoint_changelog(
                     """,
                     endpoint_names,
                 )
+            elif not full_refresh and previous_index:
+                keys = sorted(previous_index)
+                conn.executemany(
+                    """
+                    DELETE FROM endpoint_changelog_index_current
+                    WHERE endpoint = ? AND record_id = ?
+                    """,
+                    [[endpoint, record_id] for endpoint, record_id in keys],
+                )
             if current_index:
                 conn.executemany(
                     """
                     INSERT INTO endpoint_changelog_index_current (
-                        endpoint, record_id, payload_hash, tracked_payload_json, updated_at, run_id
+                        endpoint, record_id, payload_hash, tracked_payload_json,
+                        config_sha256, updated_at, run_id
                     )
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         [
@@ -180,6 +221,7 @@ def record_endpoint_changelog(
                             row.record_id,
                             row.payload_hash,
                             row.tracked_payload_json,
+                            config.config_sha256,
                             created_at,
                             run_id,
                         ]
@@ -193,9 +235,11 @@ def record_endpoint_changelog(
 
     return EndpointChangelogRun(
         run_id=run_id,
-        endpoint_count=len(config.endpoints),
+        endpoint_count=len(scoped_config.endpoints),
         record_count=len(current_index),
         event_count=len(events),
+        full_refresh=full_refresh,
+        scoped_record_count=scoped_record_count,
     )
 
 
@@ -209,10 +253,14 @@ def ensure_endpoint_changelog_tables(conn: duckdb.DuckDBPyConnection) -> None:
             config_sha256 VARCHAR NOT NULL,
             endpoint_count BIGINT NOT NULL,
             record_count BIGINT NOT NULL,
-            event_count BIGINT NOT NULL
+            event_count BIGINT NOT NULL,
+            full_refresh BOOLEAN,
+            scoped_record_count BIGINT
         )
         """
     )
+    _ensure_column(conn, "endpoint_changelog_runs", "full_refresh", "BOOLEAN")
+    _ensure_column(conn, "endpoint_changelog_runs", "scoped_record_count", "BIGINT")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS endpoint_changelog_index_current (
@@ -220,12 +268,14 @@ def ensure_endpoint_changelog_tables(conn: duckdb.DuckDBPyConnection) -> None:
             record_id VARCHAR NOT NULL,
             payload_hash VARCHAR NOT NULL,
             tracked_payload_json VARCHAR NOT NULL,
+            config_sha256 VARCHAR,
             updated_at TIMESTAMP NOT NULL,
             run_id VARCHAR NOT NULL,
             PRIMARY KEY (endpoint, record_id)
         )
         """
     )
+    _ensure_column(conn, "endpoint_changelog_index_current", "config_sha256", "VARCHAR")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS endpoint_change_events (
@@ -254,7 +304,8 @@ def list_endpoint_changelog_runs(
         return []
     clause, params = _since_filter(since, "created_at")
     query = f"""
-        SELECT run_id, created_at, config_path, endpoint_count, record_count, event_count
+        SELECT run_id, created_at, config_path, endpoint_count, record_count, event_count,
+               full_refresh, scoped_record_count
         FROM endpoint_changelog_runs
         {clause}
         ORDER BY created_at DESC
@@ -272,6 +323,8 @@ def list_endpoint_changelog_runs(
             "endpoint_count": row[3],
             "record_count": row[4],
             "event_count": row[5],
+            "full_refresh": bool(row[6]),
+            "scoped_record_count": row[7] or 0,
         }
         for row in rows
     ]
@@ -378,7 +431,46 @@ def _build_current_index(
             record_id=record_id,
             payload_hash=_payload_hash(canonical_payload),
             tracked_payload_json=canonical_payload,
+            config_sha256=config.config_sha256,
         )
+    return index
+
+
+def _build_scoped_current_index(
+    conn: duckdb.DuckDBPyConnection,
+    config: EndpointChangelogConfig,
+    *,
+    record_ids_by_endpoint: dict[str, set[str]],
+) -> dict[tuple[str, str], EndpointChangelogIndexRow]:
+    index: dict[tuple[str, str], EndpointChangelogIndexRow] = {}
+    for endpoint, record_ids in sorted(record_ids_by_endpoint.items()):
+        endpoint_config = config.endpoints.get(endpoint)
+        if endpoint_config is None or not record_ids:
+            continue
+        rows = conn.execute(
+            f"""
+            SELECT endpoint, record_id, payload
+            FROM endpoint_records
+            WHERE endpoint = ?
+              AND record_id IN ({",".join("?" for _ in record_ids)})
+            ORDER BY endpoint, record_id
+            """,
+            [endpoint, *sorted(record_ids)],
+        ).fetchall()
+        for row_endpoint, record_id, payload_json in rows:
+            try:
+                payload = json.loads(payload_json)
+            except json.JSONDecodeError:
+                continue
+            tracked_payload = _tracked_payload(payload, endpoint_config)
+            canonical_payload = _canonical_json(tracked_payload)
+            index[(row_endpoint, record_id)] = EndpointChangelogIndexRow(
+                endpoint=row_endpoint,
+                record_id=record_id,
+                payload_hash=_payload_hash(canonical_payload),
+                tracked_payload_json=canonical_payload,
+                config_sha256=config.config_sha256,
+            )
     return index
 
 
@@ -392,7 +484,7 @@ def _load_current_index(
     endpoint_names = sorted(endpoints)
     rows = conn.execute(
         f"""
-        SELECT endpoint, record_id, payload_hash, tracked_payload_json
+        SELECT endpoint, record_id, payload_hash, tracked_payload_json, config_sha256
         FROM endpoint_changelog_index_current
         WHERE endpoint IN ({",".join("?" for _ in endpoint_names)})
         """,
@@ -404,6 +496,7 @@ def _load_current_index(
             record_id=row[1],
             payload_hash=row[2],
             tracked_payload_json=row[3],
+            config_sha256=row[4],
         )
         for row in rows
     }
@@ -447,6 +540,94 @@ def _diff_endpoint_indexes(
             ]
         )
     return events
+
+
+def _scope_config(
+    conn: duckdb.DuckDBPyConnection,
+    config: EndpointChangelogConfig,
+    *,
+    endpoints: set[str] | None,
+    full: bool,
+) -> tuple[EndpointChangelogConfig, bool]:
+    endpoint_names = sorted((endpoints or set(config.endpoints)) & set(config.endpoints))
+    scoped_endpoints = {name: config.endpoints[name] for name in endpoint_names}
+    scoped_config = EndpointChangelogConfig(
+        path=config.path,
+        config_sha256=config.config_sha256,
+        endpoints=scoped_endpoints,
+    )
+    if full or not endpoint_names:
+        return scoped_config, full
+    if not _has_table(conn, "endpoint_changelog_index_current"):
+        return scoped_config, True
+    rows = conn.execute(
+        f"""
+        SELECT endpoint, COUNT(*) AS current_rows,
+               COUNT(*) FILTER (WHERE config_sha256 = ?) AS matching_config_rows
+        FROM endpoint_changelog_index_current
+        WHERE endpoint IN ({",".join("?" for _ in endpoint_names)})
+        GROUP BY endpoint
+        """,
+        [config.config_sha256, *endpoint_names],
+    ).fetchall()
+    by_endpoint = {row[0]: (int(row[1] or 0), int(row[2] or 0)) for row in rows}
+    for endpoint in endpoint_names:
+        current_rows, matching_rows = by_endpoint.get(endpoint, (0, 0))
+        if current_rows == 0 or matching_rows != current_rows:
+            return scoped_config, True
+    return scoped_config, False
+
+
+def _filter_previous_index_for_scoped_update(
+    previous_index: dict[tuple[str, str], EndpointChangelogIndexRow],
+    *,
+    current_index: dict[tuple[str, str], EndpointChangelogIndexRow],
+    deleted_record_ids_by_endpoint: dict[str, set[str]],
+) -> dict[tuple[str, str], EndpointChangelogIndexRow]:
+    keys = set(current_index)
+    for endpoint, record_ids in deleted_record_ids_by_endpoint.items():
+        keys.update((endpoint, record_id) for record_id in record_ids)
+    return {key: previous_index[key] for key in keys if key in previous_index}
+
+
+def _scoped_record_count(record_ids_by_endpoint: dict[str, set[str]] | None) -> int:
+    if not record_ids_by_endpoint:
+        return 0
+    return sum(len(record_ids) for record_ids in record_ids_by_endpoint.values())
+
+
+def _insert_run(
+    conn: duckdb.DuckDBPyConnection,
+    *,
+    run_id: str,
+    created_at: datetime,
+    config: EndpointChangelogConfig,
+    endpoint_count: int,
+    record_count: int,
+    event_count: int,
+    full_refresh: bool,
+    scoped_record_count: int,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO endpoint_changelog_runs (
+            run_id, created_at, config_path, config_sha256,
+            endpoint_count, record_count, event_count, full_refresh, scoped_record_count
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            run_id,
+            created_at,
+            str(config.path),
+            config.config_sha256,
+            endpoint_count,
+            record_count,
+            event_count,
+            full_refresh,
+            scoped_record_count,
+        ],
+    )
 
 
 def _tracked_payload(payload: dict[str, Any], config: EndpointChangelogEndpoint) -> dict[str, Any]:
@@ -570,6 +751,26 @@ def _has_table(conn: duckdb.DuckDBPyConnection, table_name: str) -> bool:
         [table_name],
     ).fetchone()
     return bool(row and row[0])
+
+
+def _ensure_column(
+    conn: duckdb.DuckDBPyConnection,
+    table_name: str,
+    column_name: str,
+    column_type: str,
+) -> None:
+    row = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM information_schema.columns
+        WHERE table_name = ?
+          AND column_name = ?
+        """,
+        [table_name, column_name],
+    ).fetchone()
+    if row and row[0]:
+        return
+    conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
 
 
 def _canonical_json(value: Any) -> str:
