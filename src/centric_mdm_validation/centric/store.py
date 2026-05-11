@@ -219,10 +219,12 @@ def ingest_raw_dir(
         upserted_record_ids_by_endpoint={
             endpoint: tuple(sorted(record_ids))
             for endpoint, record_ids in sorted(upserted_record_ids_by_endpoint.items())
+            if record_ids
         },
         deleted_record_ids_by_endpoint={
             endpoint: tuple(sorted(record_ids))
             for endpoint, record_ids in sorted(deleted_record_ids_by_endpoint.items())
+            if record_ids
         },
     )
 
@@ -1067,10 +1069,34 @@ def _apply_records_for_file(
         LEFT JOIN endpoint_records existing
           ON existing.endpoint = winners.endpoint
          AND existing.record_id = winners.record_id
-        WHERE existing.record_id IS NULL
-           OR winners.modified_at_ts IS NULL
-           OR existing.modified_at_ts IS NULL
-           OR winners.modified_at_ts >= existing.modified_at_ts
+        WHERE (
+            winners.is_delete
+            AND existing.record_id IS NOT NULL
+            AND (
+                winners.modified_at_ts IS NULL
+                OR existing.modified_at_ts IS NULL
+                OR winners.modified_at_ts >= existing.modified_at_ts
+            )
+        )
+        OR (
+            NOT winners.is_delete
+            AND (
+                existing.record_id IS NULL
+                OR (
+                    winners.modified_at_ts IS NOT NULL
+                    AND existing.modified_at_ts IS NOT NULL
+                    AND winners.modified_at_ts > existing.modified_at_ts
+                )
+                OR (
+                    (
+                        winners.modified_at_ts IS NULL
+                        OR existing.modified_at_ts IS NULL
+                        OR winners.modified_at_ts >= existing.modified_at_ts
+                    )
+                    AND winners.payload IS DISTINCT FROM existing.payload
+                )
+            )
+        )
         """
     )
 

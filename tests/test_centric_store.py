@@ -134,6 +134,70 @@ def test_ingest_raw_dir_dedupes_records_within_file_by_modified_at(tmp_path) -> 
     assert records["styles"][0]["node_name"] == "Newer Style"
 
 
+def test_ingest_raw_dir_skips_identical_overlap_delta_records(tmp_path) -> None:
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    record = {
+        "id": "S1",
+        "_modified_at": "2026-04-30T09:00:00Z",
+        "active": True,
+        "node_name": "Overlap Style",
+    }
+    _write_jsonl(raw_dir / "styles.jsonl", [record])
+    db_path = tmp_path / "centric.duckdb"
+
+    first = ingest_raw_dir(raw_dir, db_path, schemas=load_endpoint_schemas())
+    run_dir = raw_dir / "runs" / "2026-04-30T100000Z"
+    run_dir.mkdir(parents=True)
+    _write_jsonl(run_dir / "styles.delta.jsonl", [record])
+    second = ingest_raw_dir(raw_dir, db_path, schemas=load_endpoint_schemas())
+
+    assert first.records_upserted == 1
+    assert second.applied_files == 1
+    assert second.records_read == 1
+    assert second.records_upserted == 0
+    assert second.changed_record_ids_by_endpoint == {}
+
+
+def test_ingest_raw_dir_updates_same_timestamp_when_payload_differs(tmp_path) -> None:
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    _write_jsonl(
+        raw_dir / "styles.jsonl",
+        [
+            {
+                "id": "S1",
+                "_modified_at": "2026-04-30T09:00:00Z",
+                "active": True,
+                "node_name": "Original Style",
+            }
+        ],
+    )
+    db_path = tmp_path / "centric.duckdb"
+
+    ingest_raw_dir(raw_dir, db_path, schemas=load_endpoint_schemas())
+    run_dir = raw_dir / "runs" / "2026-04-30T100000Z"
+    run_dir.mkdir(parents=True)
+    _write_jsonl(
+        run_dir / "styles.delta.jsonl",
+        [
+            {
+                "id": "S1",
+                "_modified_at": "2026-04-30T09:00:00Z",
+                "active": True,
+                "node_name": "Corrected Style",
+            }
+        ],
+    )
+    result = ingest_raw_dir(raw_dir, db_path, schemas=load_endpoint_schemas())
+
+    assert result.records_upserted == 1
+    assert result.changed_record_ids_by_endpoint == {"styles": ("S1",)}
+    with duckdb.connect(str(db_path)) as conn:
+        records = load_current_endpoint_records(conn)
+    assert records["styles"][0]["node_name"] == "Corrected Style"
+
+
 def test_ingest_raw_dir_stores_typed_timestamps_and_current_views(tmp_path) -> None:
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
