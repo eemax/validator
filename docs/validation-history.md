@@ -125,7 +125,21 @@ Append-only behavior:
 
 - `validation_runs`, `validation_change_events`, and `validation_issue_change_events` are
   append-only.
-- `validation_result_index_current` is replaced per target after each validation run.
+- Full validation runs replace `validation_result_index_current` for the target.
+- Scoped no-report pipeline runs replace only the affected product/style rows in
+  `validation_result_index_current`.
+
+Scoped pipeline behavior:
+
+- `centric-mdm pipeline --target dpp --no-report` and `--target md --no-report` use scoped mode
+  once the target has a current validation index baseline.
+- The CLI applies raw files, asks the private target hook to resolve changed endpoint records to
+  affected style IDs, reconstructs and validates only those styles, and writes compact DuckDB
+  history/index updates.
+- Latest full JSON outputs are left unchanged during scoped runs. A full pipeline or explicit
+  reconstruct/validate run refreshes those files when they are needed for reporting.
+- If no target index exists yet, the command falls back to one full no-report run to establish the
+  baseline.
 
 ## CLI
 

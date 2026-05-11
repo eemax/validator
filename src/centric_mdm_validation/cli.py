@@ -19,6 +19,7 @@ from centric_mdm_validation.centric.reconstruction import (
     has_private_validation_hook,
     inspect_reconstruction_runtime,
     report_validation_results,
+    resolve_affected_style_ids,
     validate_projected_products,
 )
 from centric_mdm_validation.centric.schema import load_endpoint_schemas
@@ -26,6 +27,8 @@ from centric_mdm_validation.centric.store import (
     IngestFileProgress,
     discover_raw_files,
     ingest_raw_dir,
+    load_current_endpoint_records,
+    reconstruct_products_for_target,
     run_reconstruction_coverage_check,
     write_target_reconstruction,
 )
@@ -70,6 +73,7 @@ from centric_mdm_validation.validation_history import (
     list_validation_runs,
     parse_history_since,
     record_validation_history,
+    validation_index_counts,
 )
 
 APP_HELP = """
@@ -1079,6 +1083,22 @@ def _run_pipeline_once(
                 report_output_dir=report_path,
             )
 
+        if not include_report:
+            scoped_summary = _run_scoped_pipeline_if_possible(
+                target=target,
+                db=db,
+                ingest_result=ingest_result,
+                rules=rules,
+                validation_output_path=validation_output_path,
+                progress_reporter=progress_reporter,
+                weights=weights,
+                estimates=estimates,
+                echo_summary=echo_summary,
+            )
+            if scoped_summary is not None:
+                progress_reporter.finish_overall()
+                return scoped_summary
+
         progress_reporter.begin_overall_stage(
             weights["reconstruct"],
             estimated_seconds=estimates["reconstruct"],
@@ -1324,6 +1344,154 @@ def _run_ingest(
     if update_changelog:
         _run_changelog_after_ingest(db, result, changelog_config=changelog_config)
     return result
+
+
+def _run_scoped_pipeline_if_possible(
+    *,
+    target: str,
+    db: Path,
+    ingest_result,
+    rules: Path | None,
+    validation_output_path: Path,
+    progress_reporter: ProgressReporter,
+    weights: dict[str, float],
+    estimates: dict[str, float],
+    echo_summary: bool,
+) -> PipelineRunSummary | None:
+    if not ingest_result.changed_endpoints:
+        counts = validation_index_counts(db, target=target)
+        if counts is None:
+            _echo_step(
+                "Scoped pipeline: no existing validation index found; "
+                "running full no-report pipeline."
+            )
+            return None
+        total, ready = counts or (0, 0)
+        if echo_summary:
+            _echo_done(
+                f"Scoped pipeline skipped: no endpoint records changed during ingest. "
+                f"Latest JSON unchanged: {validation_output_path}"
+            )
+        return PipelineRunSummary(
+            target=target,
+            raw_files_applied=ingest_result.applied_files,
+            raw_files_skipped=ingest_result.skipped_files,
+            records_reconstructed=0,
+            total_records=total,
+            ready_records=ready,
+            validation_output=validation_output_path,
+            validation_run_id=None,
+            report_output_dir=None,
+        )
+
+    counts = validation_index_counts(db, target=target)
+    if counts is None:
+        _echo_step(
+            "Scoped pipeline: no existing validation index found; running full no-report pipeline."
+        )
+        return None
+
+    changed_records = {
+        endpoint: tuple(record_ids)
+        for endpoint, record_ids in ingest_result.changed_record_ids_by_endpoint.items()
+        if record_ids
+    }
+    try:
+        with duckdb.connect(str(db)) as conn:
+            records_by_endpoint = load_current_endpoint_records(conn)
+        affected_style_ids = resolve_affected_style_ids(
+            target,
+            changed_records,
+            records_by_endpoint,
+        )
+    except ValueError as exc:
+        _echo_step(f"Scoped pipeline unavailable: {exc}")
+        return None
+
+    if not affected_style_ids:
+        total, ready = counts
+        if echo_summary:
+            _echo_done(
+                f"Scoped pipeline skipped: endpoint changes do not affect {target} styles. "
+                f"Latest JSON unchanged: {validation_output_path}"
+            )
+        return PipelineRunSummary(
+            target=target,
+            raw_files_applied=ingest_result.applied_files,
+            raw_files_skipped=ingest_result.skipped_files,
+            records_reconstructed=0,
+            total_records=total,
+            ready_records=ready,
+            validation_output=validation_output_path,
+            validation_run_id=None,
+            report_output_dir=None,
+        )
+
+    progress_reporter.begin_overall_stage(
+        weights["reconstruct"],
+        estimated_seconds=estimates["reconstruct"],
+    )
+    progress_section(f"[2/4] Reconstruct affected {target.upper()} records")
+    _echo_reconstruction_runtime(target)
+    _echo_step(
+        f"Scoped pipeline: reconstructing {len(affected_style_ids)} affected style(s)"
+    )
+    projected_payloads = reconstruct_products_for_target(
+        db,
+        target=target,
+        style_ids=affected_style_ids,
+        progress=progress_reporter,
+    )
+    progress_reporter.finish_overall_stage()
+
+    progress_reporter.begin_overall_stage(
+        weights["validate"],
+        estimated_seconds=estimates["validate"],
+    )
+    progress_section(f"[3/4] Validate affected {target.upper()} records")
+    _echo_step(f"Scoped pipeline: validating {len(projected_payloads)} affected products")
+    run = _validate_records(
+        projected_payloads,
+        rules,
+        target=target,
+        progress=progress_reporter,
+    )
+    progress_reporter.finish_overall_stage()
+
+    progress_section("[4/4] Update validation history")
+    _echo_step("Scoped pipeline: updating validation history/index; latest JSON unchanged")
+    history_run = _write_validation_outputs(
+        db=db,
+        target=target,
+        latest_output_path=None,
+        run=run,
+        input_path=None,
+        write_latest=False,
+        scoped_product_ids=affected_style_ids,
+    )
+    total, ready = validation_index_counts(db, target=target) or counts
+    if echo_summary:
+        _echo_done(
+            f"Scoped pipeline complete: {ingest_result.applied_files} raw files applied "
+            f"({ingest_result.skipped_files} skipped), "
+            f"{len(affected_style_ids)} affected style(s), "
+            f"{len(projected_payloads)} products reconstructed, "
+            f"{history_run.product_change_count} product changes, "
+            f"{history_run.issue_change_count} issue changes. "
+            f"Latest JSON unchanged: {validation_output_path}. "
+            f"Run: {history_run.run_id}"
+        )
+    return PipelineRunSummary(
+        target=target,
+        raw_files_applied=ingest_result.applied_files,
+        raw_files_skipped=ingest_result.skipped_files,
+        records_reconstructed=len(projected_payloads),
+        total_records=total,
+        ready_records=ready,
+        validation_output=validation_output_path,
+        validation_run_id=history_run.run_id,
+        report_output_dir=None,
+    )
 
 
 def _run_changelog_after_ingest(db: Path, ingest_result, *, changelog_config: Path | None) -> None:
@@ -1810,17 +1978,23 @@ def _write_validation_outputs(
     *,
     db: Path,
     target: str,
-    latest_output_path: Path,
+    latest_output_path: Path | None,
     run,
     input_path: Path | None = None,
+    write_latest: bool = True,
+    scoped_product_ids: set[str] | None = None,
 ) -> ValidationHistoryRun:
-    _write_validation_result(latest_output_path, run)
+    if write_latest:
+        if latest_output_path is None:
+            raise ValueError("latest_output_path is required when write_latest=True.")
+        _write_validation_result(latest_output_path, run)
     return record_validation_history(
         db,
         target=target,
         run=run,
         input_path=input_path,
         latest_result_path=latest_output_path,
+        scoped_product_ids=scoped_product_ids,
     )
 
 

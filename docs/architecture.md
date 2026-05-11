@@ -97,7 +97,16 @@ CENTRIC_CONFIG_DIR/
 The public loader only imports `reconstruction.py`. That module can define:
 
 ```python
-def reconstruct_target_records(target, records_by_endpoint, *, progress=None):
+def reconstruct_target_records(
+    target,
+    records_by_endpoint,
+    *,
+    progress=None,
+    style_ids=None,
+):
+    ...
+
+def resolve_affected_style_ids(target, changed_records, *, records_by_endpoint):
     ...
 
 def validate_projected_products(target, payloads, *, rules=None, progress=None):
@@ -114,6 +123,9 @@ progress bars in interactive terminals and falls back to plain milestone output 
 Private target reconstructors own endpoint relationships and target assembly rules, such as how
 BOM rows attach to styles, how current BOM revisions are selected, which material/supplier/factory
 relationships feed target attributes, and how affected style IDs are derived from deltas.
+No-report target pipelines use that affected-style hook to update only changed validation
+history/index rows after delta ingest, while full pipelines still refresh latest products, latest
+validation JSON, and reports.
 
 The initial store implementation uses one generic DuckDB table for current endpoint records:
 
@@ -134,9 +146,10 @@ public list.
 Validation history is DuckDB-native. The CLI writes full validation outputs only to
 `data/results/latest/`; it does not archive large historical result JSON files. Each validation
 run appends compact rows to `validation_runs`, `validation_change_events`, and
-`validation_issue_change_events`, then replaces `validation_result_index_current` for that target.
-Historical truth is reconstructed from immutable raw files when needed. The table contract and
-query examples are documented in `docs/validation-history.md`.
+`validation_issue_change_events`. Full runs replace `validation_result_index_current` for the
+target; scoped no-report pipeline runs replace only affected rows. Historical truth is
+reconstructed from immutable raw files when needed. The table contract and query examples are
+documented in `docs/validation-history.md`.
 
 Endpoint changelog is also DuckDB-native. It is separate from validation history and tracks
 selected semantic fields from current endpoint state using `CENTRIC_CONFIG_DIR/changelog.yml` or

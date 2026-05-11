@@ -77,6 +77,16 @@ class TargetReconstructionFunction(Protocol):
     ) -> Iterable[BaseModel | Mapping[str, Any]]: ...
 
 
+class AffectedStyleFunction(Protocol):
+    def __call__(
+        self,
+        target: str,
+        changed_records: Mapping[str, Iterable[str]],
+        *,
+        records_by_endpoint: Mapping[str, Iterable[dict[str, Any]]],
+    ) -> Iterable[str]: ...
+
+
 class ValidationFunction(Protocol):
     def __call__(
         self,
@@ -205,17 +215,27 @@ def reconstruct_target_records(
     *,
     reconstruction_path: Path | None = None,
     progress: Any | None = None,
+    style_ids: Iterable[str] | None = None,
 ) -> list[BaseModel | dict[str, Any]]:
     """Build target-specific reconstruction records directly from endpoint state."""
 
     module = load_private_reconstruction_module(reconstruction_path)
     reconstruction = getattr(module, "reconstruct_target_records", None) if module else None
     if callable(reconstruction):
+        kwargs: dict[str, Any] = {}
+        if style_ids is not None:
+            if not _supports_keyword(reconstruction, "style_ids"):
+                raise ValueError(
+                    "Scoped reconstruction requires private "
+                    "reconstruct_target_records(..., style_ids=...) support."
+                )
+            kwargs["style_ids"] = set(style_ids)
         payloads = _call_with_optional_progress(
             reconstruction,
             target,
             records_by_endpoint,
             progress=progress,
+            **kwargs,
         )
         return [_coerce_projected_payload(payload) for payload in payloads]
 
@@ -224,6 +244,31 @@ def reconstruct_target_records(
         "reconstruct_target_records(target, records_by_endpoint) "
         f"in {RECONSTRUCTION_CONFIG_PATH}."
     )
+
+
+def resolve_affected_style_ids(
+    target: str,
+    changed_records: Mapping[str, Iterable[str]],
+    records_by_endpoint: Mapping[str, Iterable[dict[str, Any]]],
+    *,
+    reconstruction_path: Path | None = None,
+) -> set[str]:
+    """Resolve changed endpoint records to affected target style IDs."""
+
+    module = load_private_reconstruction_module(reconstruction_path)
+    resolver = getattr(module, "resolve_affected_style_ids", None) if module else None
+    if not callable(resolver):
+        raise ValueError(
+            f"Private affected-style resolver required for target {target!r}. Define "
+            "resolve_affected_style_ids(target, changed_records, *, records_by_endpoint) "
+            f"in {RECONSTRUCTION_CONFIG_PATH}."
+        )
+    style_ids = resolver(
+        target,
+        changed_records,
+        records_by_endpoint=records_by_endpoint,
+    )
+    return {str(style_id) for style_id in style_ids if str(style_id or "").strip()}
 
 
 def validate_projected_products(

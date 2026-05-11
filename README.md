@@ -119,12 +119,19 @@ DuckDB validation history rows, and `reports/dpp-readiness/`. Use
 `--reconstruction-output`, `--validation-output`, or `--report-output-dir` only when you want to
 override those defaults.
 
-Use `--no-report` when you only want ingest, reconstruction, validation, latest results, and
-validation run history:
+Use `--no-report` when you only want ingest, reconstruction, validation, and validation run
+history:
 
 ```bash
 uv run centric-mdm pipeline --target dpp --no-report
 ```
+
+After a target has a validation index baseline, `--no-report` runs scoped by default: it applies
+new raw files, resolves changed endpoint records to affected styles, validates only those styles,
+and updates DuckDB history/current index rows. It leaves `data/results/latest/*-products.jsonl`
+and `data/results/latest/*-results.json` unchanged so scheduled delta runs do not rewrite huge
+latest files. If no baseline exists yet, the command falls back to one full no-report run to seed
+the target index.
 
 Validation history is stored in DuckDB as compact append-only change events, not duplicated full
 result JSON. The full latest result remains in `data/results/latest/` for reporting, while raw
@@ -241,7 +248,17 @@ The public loader only imports the private `reconstruction.py` entrypoint. That 
 route to private modules using these hooks:
 
 ```python
-def reconstruct_target_records(target, records_by_endpoint, *, progress=None):
+def reconstruct_target_records(
+    target,
+    records_by_endpoint,
+    *,
+    progress=None,
+    style_ids=None,
+):
+    ...
+
+
+def resolve_affected_style_ids(target, changed_records, *, records_by_endpoint):
     ...
 
 
@@ -262,8 +279,10 @@ def report_validation_results(
 
 `reconstruct` either writes the default aggregate `check` result or materializes the requested
 private target contract directly from current DuckDB endpoint state. All non-check targets require
-a private `reconstruct_target_records` hook. Non-check target validation/reporting can use private
-hooks; `dpp` still has the public readiness validator as a fallback.
+a private `reconstruct_target_records` hook. Scheduled no-report pipelines can also use
+`resolve_affected_style_ids` plus `reconstruct_target_records(..., style_ids=...)` to update only
+affected validation history/index rows after delta ingest. Non-check target validation/reporting
+can use private hooks; `dpp` still has the public readiness validator as a fallback.
 
 ## Current Targets
 

@@ -168,6 +168,71 @@ def test_validation_history_hashes_multiple_issues_stably(tmp_path: Path) -> Non
     assert second_history.issue_change_count == 0
 
 
+def test_validation_history_updates_scoped_products_only(tmp_path: Path) -> None:
+    db_path = tmp_path / "centric.duckdb"
+    result_path = tmp_path / "results.json"
+    full_run = {
+        "rule_set_version": "test-rules",
+        "total_products": 2,
+        "ready_products": 1,
+        "readiness_percent": 50.0,
+        "results": [
+            _result("S1", ready=False, issues=[_issue("MISSING_COLOR", "error")]),
+            _result("S2", ready=True, issues=[]),
+        ],
+    }
+    write_json(result_path, full_run)
+    record_validation_history(
+        db_path,
+        target="md",
+        run=full_run,
+        input_path=None,
+        latest_result_path=result_path,
+    )
+
+    scoped_run = {
+        "rule_set_version": "test-rules",
+        "total_products": 2,
+        "ready_products": 2,
+        "readiness_percent": 100.0,
+        "results": [
+            _result("S1", ready=True, issues=[]),
+            _result("S3", ready=True, issues=[]),
+        ],
+    }
+    scoped_history = record_validation_history(
+        db_path,
+        target="md",
+        run=scoped_run,
+        input_path=None,
+        latest_result_path=None,
+        scoped_product_ids={"S1"},
+    )
+
+    assert scoped_history.product_change_count == 1
+    assert scoped_history.issue_change_count == 1
+    with duckdb.connect(str(db_path), read_only=True) as conn:
+        current = conn.execute(
+            """
+            SELECT product_id, ready
+            FROM validation_result_index_current
+            WHERE target = 'md'
+            ORDER BY product_id
+            """
+        ).fetchall()
+        run_row = conn.execute(
+            """
+            SELECT total_records, ready_records, readiness_percent, latest_result_path
+            FROM validation_runs
+            WHERE run_id = ?
+            """,
+            [scoped_history.run_id],
+        ).fetchone()
+
+    assert current == [("S1", True), ("S2", True)]
+    assert run_row == (2, 2, 100.0, None)
+
+
 def test_parse_history_since_supports_absolute_minutes_and_relative_durations() -> None:
     bangkok = timezone(timedelta(hours=7))
     now = datetime(2026, 5, 8, 13, 30, tzinfo=bangkok)
@@ -246,4 +311,18 @@ def _issue(code: str, severity: str) -> dict[str, object]:
         "source_field": "records.style.active_colorways",
         "rule_id": f"rule.{code}",
         "blocking": severity == "error",
+    }
+
+
+def _result(style_id: str, *, ready: bool, issues: list[dict[str, object]]) -> dict[str, object]:
+    return {
+        "style_id": style_id,
+        "style_name": f"Style {style_id}",
+        "brand": "CRAFT",
+        "season": "AW27",
+        "ready": ready,
+        "status": "passed" if ready else "failed",
+        "issue_count": len(issues),
+        "blocking_issue_count": sum(1 for issue in issues if issue.get("severity") == "error"),
+        "issues": issues,
     }

@@ -336,6 +336,7 @@ def reconstruct_products_for_target(
     *,
     target: str,
     progress: Callable[[ProgressEvent], None] | None = None,
+    style_ids: Iterable[str] | None = None,
 ) -> list[Any]:
     _emit_progress(
         progress,
@@ -353,7 +354,12 @@ def reconstruct_products_for_target(
         action="finish",
         message=f"{record_count} records",
     )
-    return reconstruct_target_records(target, records_by_endpoint, progress=progress)
+    return reconstruct_target_records(
+        target,
+        records_by_endpoint,
+        progress=progress,
+        style_ids=style_ids,
+    )
 
 
 def run_reconstruction_coverage_check(
