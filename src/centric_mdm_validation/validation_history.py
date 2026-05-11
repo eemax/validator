@@ -642,8 +642,11 @@ def _index_row_changed(previous: ValidationIndexRow, current: ValidationIndexRow
 
 
 def _issue_hash(issues: list[Any]) -> str:
-    identities = sorted(_issue_identity(issue) for issue in issues)
-    payload = json.dumps(identities, sort_keys=True, separators=(",", ":"))
+    identities = sorted(
+        (_issue_identity(issue) for issue in issues),
+        key=_canonical_json,
+    )
+    payload = _canonical_json(identities)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -657,6 +660,10 @@ def _issue_identity(issue: Any) -> dict[str, Any]:
         "source_path": _result_value(issue, "source_path", default=None),
         "source_record_id": _result_value(issue, "source_record_id", default=None),
     }
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
 
 def _issue_code(issue: Any) -> str:

@@ -124,6 +124,50 @@ def test_validation_history_records_current_index_and_change_events(tmp_path: Pa
     )
 
 
+def test_validation_history_hashes_multiple_issues_stably(tmp_path: Path) -> None:
+    db_path = tmp_path / "centric.duckdb"
+    input_path = tmp_path / "products.jsonl"
+    result_path = tmp_path / "results.json"
+    input_path.write_text('{"style_id":"S1"}\n', encoding="utf-8")
+
+    first_run = _run(
+        ready=False,
+        issues=[
+            _issue("MISSING_COLOR", "error"),
+            _issue("MISSING_SIZE", "error"),
+        ],
+    )
+    write_json(result_path, first_run)
+    first_history = record_validation_history(
+        db_path,
+        target="md",
+        run=first_run,
+        input_path=input_path,
+        latest_result_path=result_path,
+    )
+
+    reordered_run = _run(
+        ready=False,
+        issues=[
+            _issue("MISSING_SIZE", "error"),
+            _issue("MISSING_COLOR", "error"),
+        ],
+    )
+    write_json(result_path, reordered_run)
+    second_history = record_validation_history(
+        db_path,
+        target="md",
+        run=reordered_run,
+        input_path=input_path,
+        latest_result_path=result_path,
+    )
+
+    assert first_history.product_change_count == 1
+    assert first_history.issue_change_count == 2
+    assert second_history.product_change_count == 0
+    assert second_history.issue_change_count == 0
+
+
 def test_parse_history_since_supports_absolute_minutes_and_relative_durations() -> None:
     bangkok = timezone(timedelta(hours=7))
     now = datetime(2026, 5, 8, 13, 30, tzinfo=bangkok)
