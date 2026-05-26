@@ -336,6 +336,8 @@ Outputs:
 - `reports/md-readiness/md-issues.xlsx`
 - `reports/md-readiness/md-season-warnings.xlsx`
 - `reports/md-readiness/md-reference-coverage.xlsx`
+- `reports/md-readiness/brands/index.xlsx` and one `*-md-issues.xlsx` per brand when using
+  `--template brands`.
 
 ## Fetch Centric Data
 

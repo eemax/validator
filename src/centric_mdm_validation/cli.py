@@ -189,7 +189,7 @@ PIPELINE_TARGET_HELP = (
 REPORT_TEMPLATES = {
     "check": {"default"},
     "dpp": {"default", "brands"},
-    "md": {"default"},
+    "md": {"default", "brands"},
 }
 DEFAULT_PIPELINE_WEIGHTS = {
     "ingest": 0.10,
@@ -1275,7 +1275,7 @@ def report(
         str,
         typer.Option(
             "--template",
-            help="Report template. DPP supports: default, brands.",
+            help="Report template. DPP and MD support: default, brands.",
         ),
     ] = "default",
     progress: ProgressOption = None,
