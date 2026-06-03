@@ -55,6 +55,13 @@ endpoints:
       - field: active
         equals: false
     full_snapshot_mode: upsert_only
+  material_types:
+    primary_key: id
+    modified_at_fields: [_modified_at]
+    delete_when_any:
+      - field: active
+        equals: false
+    full_snapshot_mode: upsert_only
   boms:
     primary_key: id
     modified_at_fields: [_modified_at]

@@ -191,6 +191,9 @@ def test_repo_config_includes_style_reference_endpoints(monkeypatch) -> None:
     assert endpoint_by_name["category2s"].path == "category2s"
     assert endpoint_by_name["category2s"].count_spec is not None
     assert endpoint_by_name["category2s"].count_spec.path == "count/Category2"
+    assert endpoint_by_name["material_types"].path == "material_types"
+    assert endpoint_by_name["material_types"].count_spec is not None
+    assert endpoint_by_name["material_types"].count_spec.path == "count/MaterialType"
     assert endpoint_by_name["bom_section_definitions"].path == "bom_section_definitions"
     assert endpoint_by_name["bom_section_definitions"].count_spec is not None
     assert (
@@ -206,6 +209,7 @@ def test_repo_endpoint_schema_includes_style_reference_endpoints() -> None:
         "collections",
         "category1s",
         "category2s",
+        "material_types",
         "bom_section_definitions",
     ):
         assert schemas[endpoint].primary_key == "id"

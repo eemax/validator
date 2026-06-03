@@ -40,6 +40,17 @@ endpoints:
       api_version: v2
       path: count/Material
       result_path: $.count
+  - name: material_types
+    api_version: v2
+    path: material_types
+    skip_param: skip
+    limit_param: limit
+    limit: 50
+    item_path: $
+    count_spec:
+      api_version: v2
+      path: count/MaterialType
+      result_path: $.count
   - name: colorways
     api_version: v2
     path: colorways
