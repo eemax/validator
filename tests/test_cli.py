@@ -23,6 +23,7 @@ def test_examples_command_prints_common_workflows() -> None:
     assert "Default aggregate check" in result.output
     assert "pipeline --target dpp" in result.output
     assert "pipeline --target md" in result.output
+    assert "artifact validation-requirements" in result.output
     assert "delta-daemon --schedule" in result.output
 
 
@@ -426,6 +427,43 @@ endpoints:
     assert "Changelog: tracking 1 endpoint(s), 2 selected fields" in result.output
     assert "Changelog: endpoints: styles" in result.output
     assert "OK Endpoint changelog updated (full refresh): 1 records tracked" in result.output
+
+
+def test_artifact_validation_requirements_calls_private_artifact_hook(
+    tmp_path, monkeypatch
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("CENTRIC_CONFIG_DIR", str(config_dir))
+    monkeypatch.chdir(tmp_path)
+    (config_dir / "reconstruction.py").write_text(
+        """
+from pathlib import Path
+
+def write_artifact(artifact, output_path):
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(output_path).write_text(f"{artifact}:{output_path}", encoding="utf-8")
+    return output_path
+""",
+        encoding="utf-8",
+    )
+
+    output_path = tmp_path / "reports" / "requirements.txt"
+    result = CliRunner().invoke(
+        app,
+        [
+            "artifact",
+            "validation-requirements",
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert output_path.read_text(encoding="utf-8") == (
+        f"validation-requirements:{output_path}"
+    )
+    assert f"OK Wrote validation-requirements artifact to {output_path}" in result.output
 
 
 def test_report_accepts_existing_validation_result_json(tmp_path, monkeypatch) -> None:

@@ -106,6 +106,14 @@ class ReportFunction(Protocol):
     ) -> None: ...
 
 
+class ArtifactFunction(Protocol):
+    def __call__(
+        self,
+        artifact: str,
+        output_path: Path,
+    ) -> Path | None: ...
+
+
 def reconstruct_master_products_from_records(
     records_by_endpoint: Mapping[str, Iterable[dict[str, Any]]],
     *,
@@ -338,6 +346,32 @@ def report_validation_results(
     )
 
 
+def write_private_artifact(
+    artifact: str,
+    output_path: Path,
+    *,
+    reconstruction_path: Path | None = None,
+    progress: Any | None = None,
+) -> Path:
+    """Write private static/ad hoc artifacts that are not pipeline reports."""
+
+    module = load_private_reconstruction_module(reconstruction_path)
+    writer = getattr(module, "write_artifact", None) if module else None
+    if callable(writer):
+        result = _call_with_optional_progress(
+            writer,
+            artifact,
+            output_path,
+            progress=progress,
+        )
+        return Path(result) if result is not None else output_path
+
+    raise ValueError(
+        f"Private artifact writer required for artifact {artifact!r}. Define "
+        f"write_artifact(artifact, output_path) in {RECONSTRUCTION_CONFIG_PATH}."
+    )
+
+
 def has_private_validation_hook(*, reconstruction_path: Path | None = None) -> bool:
     module = load_private_reconstruction_module(reconstruction_path)
     return callable(getattr(module, "validate_projected_products", None)) if module else False
@@ -346,6 +380,11 @@ def has_private_validation_hook(*, reconstruction_path: Path | None = None) -> b
 def has_private_report_hook(*, reconstruction_path: Path | None = None) -> bool:
     module = load_private_reconstruction_module(reconstruction_path)
     return callable(getattr(module, "report_validation_results", None)) if module else False
+
+
+def has_private_artifact_hook(*, reconstruction_path: Path | None = None) -> bool:
+    module = load_private_reconstruction_module(reconstruction_path)
+    return callable(getattr(module, "write_artifact", None)) if module else False
 
 
 def load_private_reconstruction_module(path: Path | None = None) -> Any | None:

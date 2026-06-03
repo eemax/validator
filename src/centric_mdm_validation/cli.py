@@ -15,12 +15,14 @@ import typer
 from centric_mdm_validation.centric.cli import main as fetcher_main
 from centric_mdm_validation.centric.config import resolve_private_config_path
 from centric_mdm_validation.centric.reconstruction import (
+    has_private_artifact_hook,
     has_private_report_hook,
     has_private_validation_hook,
     inspect_reconstruction_runtime,
     report_validation_results,
     resolve_affected_style_ids,
     validate_projected_products,
+    write_private_artifact,
 )
 from centric_mdm_validation.centric.schema import load_endpoint_schemas
 from centric_mdm_validation.centric.store import (
@@ -107,8 +109,14 @@ changelog_app = typer.Typer(
     no_args_is_help=True,
     context_settings={"help_option_names": ["--help", "-h"]},
 )
+artifact_app = typer.Typer(
+    help="Write static or ad hoc private artifacts that are not pipeline reports.",
+    no_args_is_help=True,
+    context_settings={"help_option_names": ["--help", "-h"]},
+)
 app.add_typer(history_app, name="history")
 app.add_typer(changelog_app, name="changelog")
+app.add_typer(artifact_app, name="artifact")
 
 RulesOption = Annotated[
     Path | None,
@@ -139,6 +147,7 @@ DEFAULT_DPP_PRODUCTS_PATH = DEFAULT_LATEST_RESULTS_DIR / "dpp-products.jsonl"
 DEFAULT_DPP_RESULTS_PATH = DEFAULT_LATEST_RESULTS_DIR / "dpp-results.json"
 DEFAULT_RECONSTRUCTION_CHECK_REPORT_DIR = Path("reports/reconstruction-check")
 DEFAULT_DPP_REPORT_DIR = Path("reports/dpp-readiness")
+DEFAULT_VALIDATION_REQUIREMENTS_PATH = Path("reports/validation-requirements.xlsx")
 
 
 @dataclass(frozen=True)
@@ -256,6 +265,9 @@ Run steps manually:
   uv run centric-mdm validate --target dpp
   uv run centric-mdm report --target dpp
 
+Static/private artifacts:
+  uv run centric-mdm artifact validation-requirements
+
 Inspect validation history:
   uv run centric-mdm history runs --target dpp
   uv run centric-mdm history changes --target dpp --since 2d
@@ -282,6 +294,7 @@ Run recurring delta fetches:
 More help:
   uv run centric-mdm --help
   uv run centric-mdm pipeline --help
+  uv run centric-mdm artifact --help
   uv run centric-mdm history --help
   uv run centric-mdm changelog --help
   uv run centric-mdm fetch --help
@@ -315,6 +328,32 @@ def examples() -> None:
     """Show copy-paste examples for common workflows."""
 
     typer.echo(dedent(EXAMPLES_TEXT).strip())
+
+
+@artifact_app.command("validation-requirements")
+def artifact_validation_requirements(
+    output: Annotated[
+        Path,
+        typer.Option("--output", "-o", help="Output workbook path."),
+    ] = DEFAULT_VALIDATION_REQUIREMENTS_PATH,
+    progress: ProgressOption = None,
+) -> None:
+    """Write the static user-facing validation requirements workbook."""
+
+    if not has_private_artifact_hook():
+        raise typer.BadParameter(
+            "Private artifact writer required. Define write_artifact(...) in "
+            "CENTRIC_CONFIG_DIR/reconstruction.py."
+        )
+    with ProgressReporter(enabled=progress) as progress_reporter:
+        progress_section("Artifact validation-requirements")
+        _echo_step(f"Artifact: writing validation-requirements to {output}")
+        output_path = write_private_artifact(
+            "validation-requirements",
+            output,
+            progress=progress_reporter,
+        )
+    _echo_done(f"Wrote validation-requirements artifact to {output_path}")
 
 
 @history_app.command("runs")

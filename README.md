@@ -167,6 +167,19 @@ The changelog config resolves from `CENTRIC_CONFIG_DIR/changelog.yml` or `.local
 by default. See [docs/changelog.md](docs/changelog.md) for the config contract and DuckDB table
 semantics.
 
+## Ad Hoc Artifacts
+
+Some generated outputs are not pipeline reports because they do not read reconstruction or
+validation results. Use the `artifact` command namespace for those static or ad hoc private
+artifacts, so they do not get mixed into target reporting semantics.
+
+```bash
+uv run centric-mdm artifact validation-requirements
+```
+
+Artifact writers are implemented through the private `write_artifact(...)` hook when proprietary
+or customer-specific content is needed.
+
 Endpoint merge behavior lives in `config/endpoint-schema.yml`. Each endpoint can define its
 primary key, modified timestamp fields, inactive/tombstone handling, and full-file semantics.
 Delete handling uses `delete_when_any`: if any listed condition matches an incoming raw record,
